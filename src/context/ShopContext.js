@@ -3,6 +3,14 @@ import { fetchGowns } from "../services/gowns";
 import { clearUser, loadCart, loadFavorites, loadUser, saveCart, saveFavorites, saveUser } from "../utils/storage";
 import { getLastSyncAt, syncUserData } from "../services/sync";
 import { idsEqual, normalizeId } from "../utils/id";
+import {
+  fetchCartFromServer,
+  saveCartToServer,
+  addItemToCart,
+  removeItemFromCart,
+  updateCartItemQty,
+  clearCartOnServer,
+} from "../services/cart";
 
 const ShopContext = createContext(null);
 
@@ -33,6 +41,8 @@ export function ShopProvider({ children }) {
         const lastSync = await getLastSyncAt();
         if (!mounted) return;
         setGowns(gownsData);
+        
+        // Normalize local cart
         const normalizedCart = Array.isArray(cartData)
           ? cartData
               .map((x) => ({
@@ -41,7 +51,27 @@ export function ShopProvider({ children }) {
               }))
               .filter((x) => x.id)
           : [];
-        setCart(normalizedCart);
+        
+        // If user is logged in, fetch cart from server (cloud sync)
+        let cartToUse = normalizedCart;
+        if (userData?.email) {
+          try {
+            const serverCart = await fetchCartFromServer(userData.email);
+            if (Array.isArray(serverCart) && serverCart.length > 0) {
+              cartToUse = serverCart.map((x) => ({
+                id: normalizeId(x?.id),
+                qty: Math.max(1, Number(x?.qty) || 1),
+              })).filter((x) => x.id);
+              // Update local storage with server cart
+              await saveCart(cartToUse);
+            }
+          } catch (err) {
+            console.warn("Failed to fetch cart from server, using local:", err);
+            // Fallback to local cart
+          }
+        }
+        
+        setCart(cartToUse);
         setUser(userData);
         setFavoritesIds(favoritesData.map((x) => normalizeId(x)).filter(Boolean));
         setLastSyncedAt(lastSync);
@@ -55,121 +85,108 @@ export function ShopProvider({ children }) {
   }, []);
 
   const addToCart = async (id, quantity = 1) => {
-    const normalizedId = normalizeId(id);
-    const addQty = Math.max(1, Number(quantity) || 1);
-    if (!normalizedId) {
-      return { ok: false, reason: "Invalid item." };
-    }
     if (!user?.email) {
       return { ok: false, reason: "Please sign in first before adding items to cart.", requiresAuth: true };
     }
 
-    const gown = gowns.find((g) => idsEqual(g.id, normalizedId));
-    if (!gown) {
-      return { ok: false, reason: "Item not found." };
-    }
-    const stockQty = gown?.stockQty === undefined ? null : Number(gown.stockQty);
-    if (Number.isFinite(stockQty) && stockQty <= 0) {
-      return { ok: false, reason: "Out of stock." };
-    }
-
-    const next = [...cart];
-    const item = next.find((i) => idsEqual(i.id, normalizedId));
-    if (item) {
-      const nextQty = item.qty + addQty;
-      if (Number.isFinite(stockQty) && nextQty > stockQty) {
-        return { ok: false, reason: `Only ${stockQty} left.` };
+    try {
+      // Use cart service which syncs to server
+      const result = await addItemToCart(user.email, id, quantity, cart, gowns);
+      if (result.ok) {
+        setCart(result.cart);
+        await saveCart(result.cart);
       }
-      item.qty = nextQty;
-    } else {
-      if (Number.isFinite(stockQty) && addQty > stockQty) {
-        return { ok: false, reason: `Only ${stockQty} left.` };
-      }
-      next.push({ id: normalizedId, qty: addQty });
+      return result;
+    } catch (err) {
+      console.error("Error adding to cart:", err);
+      return { ok: false, reason: err.message };
     }
-    setCart(next);
-    await saveCart(next);
-    // Sync to backend immediately after cart changes
-    if (user?.email) {
-      await syncUserData({
-        user,
-        cart: next,
-        favoritesIds,
-        syncedAt: new Date().toISOString(),
-      }).catch(() => {});
-    }
-    return { ok: true };
   };
 
   const setQty = async (id, qty) => {
-    const normalizedId = normalizeId(id);
-    const gown = gowns.find((g) => idsEqual(g.id, normalizedId));
-    const stockQty = gown?.stockQty === undefined ? null : Number(gown.stockQty);
-    const safeQty = Math.max(1, qty);
-    const cappedQty =
-      Number.isFinite(stockQty) && stockQty >= 0 ? Math.min(safeQty, stockQty) : safeQty;
-    const next = cart.map((i) => (idsEqual(i.id, normalizedId) ? { ...i, qty: cappedQty } : i));
-    setCart(next);
-    await saveCart(next);
-    // Sync to backend after quantity changes
-    if (user?.email) {
-      await syncUserData({
-        user,
-        cart: next,
-        favoritesIds,
-        syncedAt: new Date().toISOString(),
-      }).catch(() => {});
+    if (!user?.email) {
+      return { ok: false, reason: "Please sign in first." };
     }
-    return { ok: true, qty: cappedQty };
+
+    try {
+      // Use cart service which syncs to server
+      const result = await updateCartItemQty(user.email, id, qty, cart, gowns);
+      if (result.ok) {
+        setCart(result.cart);
+        await saveCart(result.cart);
+      }
+      return result;
+    } catch (err) {
+      console.error("Error updating cart quantity:", err);
+      return { ok: false, reason: err.message };
+    }
   };
 
   const removeFromCart = async (id) => {
-    const normalizedId = normalizeId(id);
-    const next = cart.filter((i) => !idsEqual(i.id, normalizedId));
-    setCart(next);
-    await saveCart(next);
-    // Sync to backend after item removal
-    if (user?.email) {
-      await syncUserData({
-        user,
-        cart: next,
-        favoritesIds,
-        syncedAt: new Date().toISOString(),
-      }).catch(() => {});
+    if (!user?.email) {
+      return { ok: false, reason: "Please sign in first." };
+    }
+
+    try {
+      // Use cart service which syncs to server
+      const result = await removeItemFromCart(user.email, id, cart);
+      if (result.ok) {
+        setCart(result.cart);
+        await saveCart(result.cart);
+      }
+      return result;
+    } catch (err) {
+      console.error("Error removing from cart:", err);
+      return { ok: false, reason: err.message };
     }
   };
 
   const clearCart = async () => {
+    if (user?.email) {
+      try {
+        await clearCartOnServer(user.email);
+      } catch (err) {
+        console.warn("Failed to clear cart on server:", err);
+      }
+    }
     setCart([]);
     await saveCart([]);
-    // Sync to backend after cart clear
-    if (user?.email) {
-      await syncUserData({
-        user,
-        cart: [],
-        favoritesIds,
-        syncedAt: new Date().toISOString(),
-      }).catch(() => {});
-    }
   };
 
   const login = async (nextUser) => {
     setUser(nextUser);
     await saveUser(nextUser);
-    // Sync to backend after login
+    
+    // Fetch user's cart from server after login
     if (nextUser?.email) {
-      await syncUserData({
-        user: nextUser,
-        cart,
-        favoritesIds,
-        syncedAt: new Date().toISOString(),
-      }).catch(() => {});
+      try {
+        const serverCart = await fetchCartFromServer(nextUser.email);
+        if (Array.isArray(serverCart) && serverCart.length > 0) {
+          const normalizedCart = serverCart.map((x) => ({
+            id: normalizeId(x?.id),
+            qty: Math.max(1, Number(x?.qty) || 1),
+          })).filter((x) => x.id);
+          setCart(normalizedCart);
+          await saveCart(normalizedCart);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch cart from server on login:", err);
+      }
     }
   };
 
   const logout = async () => {
+    if (user?.email) {
+      try {
+        await clearCartOnServer(user.email);
+      } catch (err) {
+        console.warn("Failed to clear cart on server during logout:", err);
+      }
+    }
     setUser(null);
+    setCart([]);
     await clearUser();
+    await saveCart([]);
   };
 
   const syncNow = async () => {
