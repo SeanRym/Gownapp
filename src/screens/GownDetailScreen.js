@@ -1,18 +1,42 @@
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { useShop } from "../context/ShopContext";
 import { brand } from "../theme/brand";
 import { idsEqual, normalizeId } from "../utils/id";
+import { trackInteraction, getRecommendationsForGown } from "../services/recommendations";
 
 export function GownDetailScreen({ route, navigation }) {
   const { id } = route.params || {};
-  const { gowns, addToCart, favoritesSet, toggleFavorite } = useShop();
+  const { gowns, addToCart, favoritesSet, toggleFavorite, user } = useShop();
+  const [recommendations, setRecommendations] = useState([]);
+  const [loadingReco, setLoadingReco] = useState(false);
 
   const gown = useMemo(
     () => gowns.find((g) => idsEqual(g.id, id)) || null,
     [gowns, id]
   );
+
+  // Track view and load recommendations
+  useEffect(() => {
+    if (!gown || !user?.email) return;
+
+    (async () => {
+      try {
+        // Track this view
+        await trackInteraction(user.email, gown.id, "view");
+
+        // Load recommendations
+        setLoadingReco(true);
+        const reco = await getRecommendationsForGown(user.email, gown.id, gowns);
+        setRecommendations(Array.isArray(reco) ? reco : []);
+      } catch (err) {
+        console.warn("Failed to load recommendations:", err);
+      } finally {
+        setLoadingReco(false);
+      }
+    })();
+  }, [gown?.id, user?.email, gowns]);
 
   if (!gown) {
     return (
@@ -216,6 +240,27 @@ export function GownDetailScreen({ route, navigation }) {
           </Pressable>
         </Pressable>
       </Modal>
+
+      {recommendations.length > 0 && (
+        <View style={styles.recoSection}>
+          <Text style={styles.recoTitle}>You might also like</Text>
+          <View style={styles.recoGrid}>
+            {recommendations.map((recoGown) => (
+              <Pressable
+                key={recoGown.id}
+                style={styles.recoCard}
+                onPress={() => navigation.push("GownDetail", { id: recoGown.id })}
+              >
+                <Image source={{ uri: recoGown.image }} style={styles.recoImage} />
+                <Text style={styles.recoName} numberOfLines={2}>
+                  {recoGown.name}
+                </Text>
+                <Text style={styles.recoPrice}>{recoGown.price}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      )}
     </ScrollView>
   );
 }
@@ -277,4 +322,11 @@ const styles = StyleSheet.create({
   colSize: { flex: 0.8 },
   guidePrimaryBtn: { backgroundColor: "#2a170f", borderRadius: 6, paddingVertical: 9, paddingHorizontal: 10 },
   guidePrimaryText: { color: "#f0d3a6", fontSize: 10, textTransform: "uppercase", fontWeight: "700", letterSpacing: 0.6, textAlign: "center" },
+  recoSection: { marginTop: 20, paddingHorizontal: 0 },
+  recoTitle: { fontSize: 14, fontWeight: "700", color: brand.dark, marginBottom: 12, paddingHorizontal: 16, textTransform: "uppercase", letterSpacing: 0.6 },
+  recoGrid: { flexDirection: "row", flexWrap: "wrap", gap: 12, paddingHorizontal: 16 },
+  recoCard: { width: "48%", backgroundColor: brand.white, borderRadius: 10, overflow: "hidden", borderWidth: 1, borderColor: brand.border },
+  recoImage: { width: "100%", height: 180, backgroundColor: "#f0f0f0" },
+  recoName: { fontSize: 11, fontWeight: "600", color: brand.dark, padding: 8, paddingBottom: 4 },
+  recoPrice: { fontSize: 10, color: brand.buttonAlt, fontWeight: "700", paddingHorizontal: 8, paddingBottom: 8, letterSpacing: 0.5 },
 });

@@ -9,7 +9,7 @@ export async function fetchCartFromServer(userEmail) {
   try {
     if (!userEmail) return [];
     
-    const res = await fetch(`${API_BASE_URL}/api/cart`, {
+    const res = await fetch(`${API_BASE_URL}/api/mobile/cart`, {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
@@ -39,7 +39,7 @@ export async function saveCartToServer(userEmail, cartItems) {
   try {
     if (!userEmail) return { ok: false, reason: "User not authenticated" };
     
-    const res = await fetch(`${API_BASE_URL}/api/cart`, {
+    const res = await fetch(`${API_BASE_URL}/api/mobile/cart`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

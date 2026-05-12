@@ -11,6 +11,7 @@ import {
   updateCartItemQty,
   clearCartOnServer,
 } from "../services/cart";
+import { trackInteraction, syncInteractionsToServer } from "../services/recommendations";
 
 const ShopContext = createContext(null);
 
@@ -84,6 +85,14 @@ export function ShopProvider({ children }) {
     };
   }, []);
 
+  // Periodic sync of interactions to server
+  useEffect(() => {
+    const interval = setInterval(() => {
+      syncInteractionsToServer().catch(() => {});
+    }, 5 * 60 * 1000); // Every 5 minutes
+    return () => clearInterval(interval);
+  }, []);
+
   const addToCart = async (id, quantity = 1) => {
     if (!user?.email) {
       return { ok: false, reason: "Please sign in first before adding items to cart.", requiresAuth: true };
@@ -95,6 +104,8 @@ export function ShopProvider({ children }) {
       if (result.ok) {
         setCart(result.cart);
         await saveCart(result.cart);
+        // Track the interaction
+        await trackInteraction(user.email, id, "cart_add");
       }
       return result;
     } catch (err) {
@@ -178,9 +189,14 @@ export function ShopProvider({ children }) {
   const logout = async () => {
     if (user?.email) {
       try {
+        // Save session basket before logout
+        const { saveSessionBasket } = await import("../services/recommendations");
+        await saveSessionBasket();
+        // Sync pending interactions
+        await syncInteractionsToServer();
         await clearCartOnServer(user.email);
       } catch (err) {
-        console.warn("Failed to clear cart on server during logout:", err);
+        console.warn("Failed during logout cleanup:", err);
       }
     }
     setUser(null);
@@ -234,7 +250,7 @@ export function ShopProvider({ children }) {
       : [...favoritesIds.map(normalizeId), normalizedId];
     setFavoritesIds(next);
     await saveFavorites(next);
-    // Sync to backend after favorites change
+    // Sync to backend and track interaction
     if (user?.email) {
       await syncUserData({
         user,
@@ -242,6 +258,8 @@ export function ShopProvider({ children }) {
         favoritesIds: next,
         syncedAt: new Date().toISOString(),
       }).catch(() => {});
+      // Track as favorite interaction
+      await trackInteraction(user.email, id, "favorite");
     }
   };
 
