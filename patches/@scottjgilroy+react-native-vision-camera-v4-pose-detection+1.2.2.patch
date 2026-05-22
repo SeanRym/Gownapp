@@ -1,14 +1,128 @@
 diff --git a/node_modules/@scottjgilroy/react-native-vision-camera-v4-pose-detection/android/src/main/java/com/visioncamerav3posedetection/VisionCameraV3PoseDetectionModule.kt b/node_modules/@scottjgilroy/react-native-vision-camera-v4-pose-detection/android/src/main/java/com/visioncamerav3posedetection/VisionCameraV3PoseDetectionModule.kt
-index 1111111..2222222 100644
+index 89f218d..16ecc47 100644
 --- a/node_modules/@scottjgilroy/react-native-vision-camera-v4-pose-detection/android/src/main/java/com/visioncamerav3posedetection/VisionCameraV3PoseDetectionModule.kt
 +++ b/node_modules/@scottjgilroy/react-native-vision-camera-v4-pose-detection/android/src/main/java/com/visioncamerav3posedetection/VisionCameraV3PoseDetectionModule.kt
-@@ -86,7 +86,8 @@ class VisionCameraV3PoseDetectionModule(proxy : VisionCameraProxy, options: M
-       addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_MOUTH), "leftMouthPosition")
-       addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_MOUTH), "rightMouthPosition")
- }
+@@ -3,7 +3,6 @@ package com.visioncamerav3posedetection
+ import android.media.Image
+ import android.view.Surface
+ import com.facebook.react.bridge.WritableNativeMap
+-import com.google.android.gms.tasks.Task
+ import com.google.android.gms.tasks.Tasks
+ import com.google.mlkit.vision.common.InputImage
+ import com.google.mlkit.vision.pose.Pose
+@@ -16,16 +15,23 @@ import com.mrousavy.camera.frameprocessors.VisionCameraProxy
+ import com.mrousavy.camera.core.types.Orientation
+ import java.util.HashMap
+ 
+-class VisionCameraV3PoseDetectionModule(proxy : VisionCameraProxy, options: Map<String, Any>?): FrameProcessorPlugin() {
++class VisionCameraV3PoseDetectionModule(proxy : VisionCameraProxy, options: Map<String, Any>?) :
++  FrameProcessorPlugin() {
++
++  companion object {
++    private val streamDetector by lazy {
++      PoseDetection.getClient(
++        PoseDetectorOptions.Builder()
++          .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
++          .setPreferredHardwareConfigs(PoseDetectorOptions.CPU_GPU)
++          .build()
++      )
++    }
++  }
+ 
+   override fun callback(frame: Frame, arguments: Map<String, Any>?): HashMap<String, Any> {
++    val out = HashMap<String, Any>()
+     try {
+-      val options = PoseDetectorOptions.Builder()
+-      if (arguments?.get("mode") === "stream") options.setDetectorMode(PoseDetectorOptions.STREAM_MODE)
+-      else if (arguments?.get("mode") === "single") options.setDetectorMode(PoseDetectorOptions.SINGLE_IMAGE_MODE)
+-      if (arguments?.get("performanceMode") === "min") options.setPreferredHardwareConfigs(PoseDetectorOptions.CPU)
+-      else if (arguments?.get("performanceMode") === "max") options.setPreferredHardwareConfigs(PoseDetectorOptions.CPU_GPU)
+-      val poseDetector = PoseDetection.getClient(options.build())
+       val mediaImage: Image = frame.image
+       val orientation: Orientation = frame.orientation
+       val surfaceRotation = orientation.toSurfaceRotation()
+@@ -41,58 +47,41 @@ class VisionCameraV3PoseDetectionModule(proxy : VisionCameraProxy, options: Map<
+ 
+       val image = InputImage.fromMediaImage(
+         mediaImage,
+-        surfaceRotationToDegrees( surfaceRotation )
++        surfaceRotationToDegrees(surfaceRotation)
+       )
+-      val task: Task<Pose> = poseDetector.process(image)
+-      val pose: Pose = Tasks.await(task)
++      val pose: Pose = Tasks.await(streamDetector.process(image))
+       val map = WritableNativeMap()
++      map.putInt("imageWidth", image.width)
++      map.putInt("imageHeight", image.height)
++
+       fun addLandmarkToMap(landmark: PoseLandmark?, landmarkName: String) {
+         val landmarkMap = WritableNativeMap()
+         landmarkMap.putDouble("x", landmark?.position?.x?.toDouble() ?: 0.0)
+         landmarkMap.putDouble("y", landmark?.position?.y?.toDouble() ?: 0.0)
+-
+         map.putMap(landmarkName, landmarkMap)
+       }
+-      if (pose.allPoseLandmarks.isNotEmpty()){
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER), "leftShoulderPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER), "rightShoulderPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_ELBOW), "leftElbowPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_ELBOW), "rightElbowPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_WRIST), "leftWristPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST), "rightWristPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_HIP), "leftHipPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_HIP), "rightHipPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_KNEE), "leftKneePosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_KNEE), "rightKneePosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE), "leftAnklePosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_ANKLE), "rightAnklePosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_PINKY), "leftPinkyPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_PINKY), "rightPinkyPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_INDEX), "leftIndexPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_INDEX), "rightIndexPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_THUMB), "leftThumbPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_THUMB), "rightThumbPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_HEEL), "leftHeelPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_HEEL), "rightHeelPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_FOOT_INDEX), "leftFootIndexPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_FOOT_INDEX), "rightFootIndexPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.NOSE), "nosePosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_EYE_INNER), "leftEyeInnerPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_EYE), "leftEyePosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_EYE_OUTER), "leftEyeOuterPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_EYE_INNER), "rightEyeInnerPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_EYE), "rightEyePosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_EYE_OUTER), "rightEyeOuterPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_EAR), "leftEarPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_EAR), "rightEarPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_MOUTH), "leftMouthPosition")
+-      addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_MOUTH), "rightMouthPosition")
+-}
 -      return map.toHashMap()
++
++      if (pose.allPoseLandmarks.isNotEmpty()) {
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER), "leftShoulderPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER), "rightShoulderPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_ELBOW), "leftElbowPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_ELBOW), "rightElbowPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_WRIST), "leftWristPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST), "rightWristPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_HIP), "leftHipPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_HIP), "rightHipPosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_KNEE), "leftKneePosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_KNEE), "rightKneePosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE), "leftAnklePosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.RIGHT_ANKLE), "rightAnklePosition")
++        addLandmarkToMap(pose.getPoseLandmark(PoseLandmark.NOSE), "nosePosition")
++      }
++
 +      @Suppress("UNCHECKED_CAST")
 +      return map.toHashMap() as HashMap<String, Any>
      } catch (e: Exception) {
-       throw Exception("Error processing pose detection: $e")
+-      throw Exception("Error processing pose detection: $e")
++      out["error"] = e.message ?: "pose_detection_failed"
++      return out
      }
+   }
+ }
+-
+-

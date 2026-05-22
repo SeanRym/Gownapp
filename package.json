@@ -24,6 +24,7 @@
     "expo-print": "^55.0.13",
     "expo-sharing": "^55.0.14",
     "expo-status-bar": "~55.0.4",
+    "jpeg-js": "^0.4.4",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "react-native": "0.83.2",
@@ -35,11 +36,11 @@
     "react-native-vision-camera": "^4.7.3",
     "react-native-web": "^0.21.0",
     "react-native-worklets-core": "^1.6.3",
+    "patch-package": "^8.0.1",
     "vision-camera-native-segmentation": "file:./packages/vision-camera-native-segmentation"
   },
   "private": true,
   "devDependencies": {
-    "babel-preset-expo": "^55.0.16",
-    "patch-package": "^8.0.1"
+    "babel-preset-expo": "^55.0.16"
   }
 }
