@@ -173,23 +173,33 @@ export function GownDetailScreen({ route, navigation }) {
         disabled={isOutOfStock}
         onPress={async () => {
           try {
-            const result = await addToCart(gown.id, qty);
+            const result = await addToCart(gown.id, qty, {
+              size: sizeOptions.length ? selectedSize : null,
+            });
             if (!result?.ok) {
               if (result?.requiresAuth) {
                 Alert.alert("Sign in required", result?.reason || "Please sign in first.");
                 navigation.navigate("Login");
                 return;
               }
-              Alert.alert("Cannot add to cart", result?.reason || "Not available.");
+              Alert.alert("Cannot add", result?.reason || "Not available.");
               return;
             }
-            navigation.navigate("Cart");
+            navigation.navigate("SavedGowns");
           } catch (e) {
-            Alert.alert("Cannot add to cart", e?.message || "Please try again.");
+            Alert.alert("Cannot add", e?.message || "Please try again.");
           }
         }}
       >
-        <Text style={styles.btnText}>{isOutOfStock ? "Out of Stock" : `Add ${qty} to Cart`}</Text>
+        <Text style={styles.btnText}>
+          {isOutOfStock ? "Out of Stock" : `Add ${qty} to Fitting Room`}
+        </Text>
+      </Pressable>
+      <Pressable
+        style={styles.secondaryBtn}
+        onPress={() => navigation.navigate("FittingStudio", { gownId: gown.id, panel: "tryon" })}
+      >
+        <Text style={styles.secondaryBtnText}>Open in fitting studio</Text>
       </Pressable>
       <Text style={styles.note}>Selected size: {selectedSize}</Text>
 
@@ -304,6 +314,21 @@ const styles = StyleSheet.create({
   btn: { marginTop: 6, backgroundColor: brand.button, paddingVertical: 12, borderRadius: 9 },
   btnDisabled: { opacity: 0.5 },
   btnText: { color: brand.white, textAlign: "center", fontWeight: "700", letterSpacing: 1.1, fontSize: 11 },
+  secondaryBtn: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: brand.border,
+    backgroundColor: brand.white,
+    paddingVertical: 11,
+    borderRadius: 9,
+  },
+  secondaryBtnText: {
+    textAlign: "center",
+    color: brand.dark,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+    fontSize: 11,
+  },
   note: { marginTop: 8, color: brand.textLight, fontSize: 11, textAlign: "center" },
   guideBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.35)", alignItems: "center", justifyContent: "center", padding: 16 },
   guideModal: { width: "100%", maxWidth: 380, borderWidth: 1, borderColor: brand.border, borderRadius: 10, backgroundColor: brand.white, padding: 12 },

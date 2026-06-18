@@ -4,18 +4,27 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import Constants, { ExecutionEnvironment } from "expo-constants";
 import * as MediaLibrary from "expo-media-library";
 import * as Sharing from "expo-sharing";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { captureRef } from "react-native-view-shot";
 import { GownNativeSegmentationOverlay } from "../ar/GownNativeSegmentationOverlay";
-import { GownSvgOverlay } from "../ar/GownSvgOverlay";
 import { NativePoseCamera } from "../ar/NativePoseCamera";
 import { isNativeSegmentationAvailable } from "vision-camera-native-segmentation";
-import { getAutoFitTransform } from "../ar/autoFit";
-import { posePluginToLandmarks } from "../ar/posePluginToLandmarks";
-import { smoothPoseTransform } from "../ar/smoothPoseTransform";
+import { GownFittedOverlay } from "../components/ar/GownFittedOverlay";
+import {
+  analyzeTryonPose,
+  getGownLayout,
+  landmarksToPixelKps,
+  parseTryonCalibration,
+  resolveTryonImageUri,
+  smoothGownLayout,
+} from "../ar/gownLayout";
+import { parsePosePayload } from "../ar/posePluginToLandmarks";
+import { pickDisplayLandmarks } from "../utils/poseCoordinateTransform";
 import { useShop } from "../context/ShopContext";
+import { saveTryonSnapshot } from "../services/fitting";
 import { brand } from "../theme/brand";
+import { filterGownsForProfile } from "../utils/gownSegmentFilter";
 import { idsEqual } from "../utils/id";
 import { loadArFitProfiles, saveArFitProfiles } from "../utils/storage";
 
@@ -31,7 +40,17 @@ const DEFAULT_FIT_MODEL = {
 };
 
 export function ARTryOnScreen({ route }) {
-  const { gowns } = useShop();
+  const navigation = useNavigation();
+  const { gowns, user } = useShop();
+  const saveToProfile = Boolean(route?.params?.saveToProfile && user?.id);
+  const catalogGowns = useMemo(
+    () =>
+      filterGownsForProfile(gowns, {
+        segment: route?.params?.segment || "women",
+        childGender: route?.params?.childGender || null,
+      }),
+    [gowns, route?.params?.segment, route?.params?.childGender]
+  );
   const isFocused = useIsFocused();
   const [permission, requestPermission] = useCameraPermissions();
   const [cameraFacing, setCameraFacing] = useState("front");
@@ -50,21 +69,24 @@ export function ARTryOnScreen({ route }) {
   const [saving, setSaving] = useState(false);
   const [previewLayout, setPreviewLayout] = useState({ width: 320, height: 430 });
   const [overlayLayout, setOverlayLayout] = useState({ width: 0, height: 0 });
-  const [livePoseTransform, setLivePoseTransform] = useState(null);
+  const [liveGownLayout, setLiveGownLayout] = useState(null);
+  const [tryonPoseOk, setTryonPoseOk] = useState(false);
+  const [tryonPoseIssues, setTryonPoseIssues] = useState([]);
   const [landmarksForMask, setLandmarksForMask] = useState(null);
   const overlayPan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
   const previewRef = useRef(null);
   const videoDimsRef = useRef({ width: 720, height: 1280 });
   const previewLayoutRef = useRef({ width: 320, height: 430 });
-  const poseSmoothRef = useRef(null);
+  const gownLayoutSmoothRef = useRef(null);
+  const selectedGownRef = useRef(null);
   const lastPoseAtRef = useRef(0);
 
   const selectedGown = useMemo(() => {
-    const fallback = gowns[0] || null;
-    if (!gowns.length) return null;
+    const fallback = catalogGowns[0] || null;
+    if (!catalogGowns.length) return null;
     if (!selectedId) return fallback;
-    return gowns.find((g) => idsEqual(g.id, selectedId)) || fallback;
-  }, [gowns, selectedId]);
+    return catalogGowns.find((g) => idsEqual(g.id, selectedId)) || fallback;
+  }, [catalogGowns, selectedId]);
 
   useEffect(() => {
     let mounted = true;
@@ -106,41 +128,22 @@ export function ARTryOnScreen({ route }) {
     }));
   };
 
-  const seedLandmarks = useMemo(
-    () => ({
-      leftShoulder: { x: fitModel.centerX - fitModel.shoulderWidth / 2, y: fitModel.centerY - fitModel.torsoHeight / 2 },
-      rightShoulder: { x: fitModel.centerX + fitModel.shoulderWidth / 2, y: fitModel.centerY - fitModel.torsoHeight / 2 },
-      leftHip: { x: fitModel.centerX - fitModel.shoulderWidth * 0.28, y: fitModel.centerY + fitModel.torsoHeight / 2 },
-      rightHip: { x: fitModel.centerX + fitModel.shoulderWidth * 0.28, y: fitModel.centerY + fitModel.torsoHeight / 2 },
-    }),
-    [fitModel]
-  );
+  useEffect(() => {
+    selectedGownRef.current = selectedGown;
+  }, [selectedGown]);
 
-  const frameSize = useMemo(() => {
-    const w = previewLayout.width || 320;
-    const h = previewLayout.height || 430;
-    return { width: w, height: h };
-  }, [previewLayout.height, previewLayout.width]);
+  const tryonUri = useMemo(() => resolveTryonImageUri(selectedGown), [selectedGown]);
 
-  const seedAutoFit = useMemo(() => {
-    if (!autoFitEnabled) return null;
-    return getAutoFitTransform(seedLandmarks, frameSize);
-  }, [autoFitEnabled, seedLandmarks, frameSize]);
-
-  const trackingLivePose = canUseNativePose && poseDetected && livePoseTransform != null;
+  const useWebBodyFit =
+    autoFitEnabled && canUseNativePose && tryonPoseOk && liveGownLayout && Boolean(tryonUri);
 
   const showNativePersonMask =
+    !useWebBodyFit &&
     segmentationNativeLinked &&
     nativeSegmentationEnabled &&
     nativeMaskUri &&
     overlayLayout.width > 40 &&
     overlayLayout.height > 40;
-
-  const autoFit = useMemo(() => {
-    if (!autoFitEnabled) return null;
-    if (trackingLivePose) return livePoseTransform;
-    return seedAutoFit;
-  }, [autoFitEnabled, livePoseTransform, seedAutoFit, trackingLivePose]);
 
   const onVideoDimensions = useCallback((dims) => {
     if (dims?.width && dims?.height) videoDimsRef.current = dims;
@@ -158,31 +161,58 @@ export function ARTryOnScreen({ route }) {
   }, [nativeSegmentationEnabled]);
 
   const onPoseMap = useCallback(
-    (raw) => {
+    (payload) => {
       if (!autoFitEnabled || !canUseNativePose) return;
-      const { width: vw, height: vh } = videoDimsRef.current;
-      const landmarks = posePluginToLandmarks(raw, vw, vh, cameraFacing === "front");
+      if (payload?.error) return;
+      const parsed = parsePosePayload(payload, {
+        fallbackW: videoDimsRef.current.width,
+        fallbackH: videoDimsRef.current.height,
+      });
+      const pl = previewLayoutRef.current;
+      const landmarks =
+        parsed?.landmarks && pl.width > 0 && pl.height > 0
+          ? pickDisplayLandmarks(
+              parsed.landmarks,
+              pl.width,
+              pl.height,
+              parsed.imageWidth,
+              parsed.imageHeight,
+              cameraFacing,
+              "cover"
+            )
+          : null;
       if (!landmarks) {
         return;
       }
       lastPoseAtRef.current = Date.now();
       setPoseDetected(true);
-      const pl = previewLayoutRef.current;
-      const fs = { width: pl.width || 320, height: pl.height || 430 };
-      const t = getAutoFitTransform(landmarks, fs);
-      if (!t) return;
-      poseSmoothRef.current = smoothPoseTransform(poseSmoothRef.current, t, 0.38);
-      setLivePoseTransform({ ...poseSmoothRef.current });
+      const vw = pl.width || 320;
+      const vh = pl.height || 430;
+      const kps = landmarksToPixelKps(landmarks, vw, vh);
+      const analysis = analyzeTryonPose(kps, vw, vh);
+      setTryonPoseIssues(analysis.issues || []);
 
-      const { width: pw, height: ph } = previewLayoutRef.current;
-      if (pw > 0 && ph > 0) {
-        const maskLm = {};
-        for (const k of ["leftWrist", "rightWrist", "leftElbow", "rightElbow"]) {
-          const p = landmarks[k];
-          if (p) maskLm[k] = { x: p.x, y: p.y };
+      const cal = parseTryonCalibration(selectedGownRef.current?.tryonCalibration);
+      const layout = kps ? getGownLayout(kps, cal, vw, vh) : null;
+
+      if (layout && analysis.shouldersOk && analysis.hipsOk) {
+        gownLayoutSmoothRef.current = smoothGownLayout(gownLayoutSmoothRef.current, layout, 0.38);
+        setLiveGownLayout({ ...gownLayoutSmoothRef.current });
+        setTryonPoseOk(true);
+      } else {
+        setTryonPoseOk(false);
+        if (!analysis.shouldersOk || !analysis.hipsOk) {
+          gownLayoutSmoothRef.current = null;
+          setLiveGownLayout(null);
         }
-        setLandmarksForMask(maskLm);
       }
+
+      const maskLm = {};
+      for (const k of ["leftWrist", "rightWrist", "leftElbow", "rightElbow"]) {
+        const p = landmarks[k];
+        if (p) maskLm[k] = { x: p.x, y: p.y };
+      }
+      setLandmarksForMask(Object.keys(maskLm).length ? maskLm : null);
     },
     [autoFitEnabled, cameraFacing, canUseNativePose]
   );
@@ -202,13 +232,15 @@ export function ARTryOnScreen({ route }) {
   }, [previewLayout]);
 
   useEffect(() => {
-    poseSmoothRef.current = null;
-    setLivePoseTransform(null);
+    gownLayoutSmoothRef.current = null;
+    setLiveGownLayout(null);
     setLandmarksForMask(null);
+    setTryonPoseOk(false);
+    setTryonPoseIssues([]);
     lastPoseAtRef.current = 0;
     setPoseDetected(false);
     setNativeMaskUri(null);
-  }, [cameraFacing]);
+  }, [cameraFacing, selectedGown?.id]);
 
   const panResponder = useMemo(
     () =>
@@ -228,6 +260,30 @@ export function ARTryOnScreen({ route }) {
   const onCaptureAndSave = async () => {
     try {
       setSaving(true);
+      const base64 = await captureRef(previewRef, {
+        format: "jpg",
+        quality: 0.9,
+        result: "base64",
+      });
+      const dataUrl = `data:image/jpeg;base64,${base64}`;
+
+      if (saveToProfile) {
+        try {
+          await saveTryonSnapshot(user.id, {
+            image: dataUrl,
+            gownId: selectedGown?.id,
+            gownName: route?.params?.gownName || selectedGown?.name || "",
+          });
+          navigation.navigate("FittingStudio", {
+            panel: "tryon",
+            gownId: selectedGown?.id,
+            tryonSaveMsg: "✓ Saved to your profile",
+          });
+        } catch (e) {
+          Alert.alert("Profile save failed", e?.message || "Could not save to your account.");
+        }
+      }
+
       const uri = await captureRef(previewRef, {
         format: "jpg",
         quality: 0.9,
@@ -242,21 +298,38 @@ export function ARTryOnScreen({ route }) {
             await Sharing.shareAsync(uri, {
               dialogTitle: "Save or share your AR preview",
             });
-            Alert.alert("Preview ready", "Opened share options so you can save the AR image.");
+            Alert.alert(
+              "Preview ready",
+              saveToProfile
+                ? "Saved to your profile. Opened share options for your device gallery."
+                : "Opened share options so you can save the AR image."
+            );
           } else {
             Alert.alert("Permission needed", "Please allow media library access to save your AR preview.");
           }
           return;
         }
         await MediaLibrary.saveToLibraryAsync(uri);
-        Alert.alert("Saved", "Your AR try-on preview has been saved to your gallery.");
+        Alert.alert(
+          "Saved",
+          saveToProfile
+            ? "Try-on saved to your profile and device gallery."
+            : "Your AR try-on preview has been saved to your gallery."
+        );
       } catch {
         const canShare = await Sharing.isAvailableAsync();
         if (canShare) {
           await Sharing.shareAsync(uri, {
             dialogTitle: "Save or share your AR preview",
           });
-          Alert.alert("Preview ready", "Opened share options so you can save the AR image.");
+          Alert.alert(
+            "Preview ready",
+            saveToProfile
+              ? "Saved to your profile. Opened share options for your device."
+              : "Opened share options so you can save the AR image."
+          );
+        } else if (saveToProfile) {
+          Alert.alert("Saved to profile", "Try-on image saved to your account.");
         } else {
           Alert.alert(
             "Save not available here",
@@ -278,9 +351,10 @@ export function ARTryOnScreen({ route }) {
     setOverlayOpacity(0.72);
     setFitModel(DEFAULT_FIT_MODEL);
     setAutoFitEnabled(true);
-    poseSmoothRef.current = null;
-    setLivePoseTransform(null);
+    gownLayoutSmoothRef.current = null;
+    setLiveGownLayout(null);
     setLandmarksForMask(null);
+    setTryonPoseOk(false);
     lastPoseAtRef.current = 0;
     setPoseDetected(false);
     setNativeMaskUri(null);
@@ -322,7 +396,11 @@ export function ARTryOnScreen({ route }) {
   if (!selectedGown) {
     return (
       <View style={styles.center}>
-        <Text style={styles.subtitle}>No gowns available yet.</Text>
+        <Text style={styles.subtitle}>
+          {catalogGowns.length === 0 && route?.params?.segment
+            ? "No items match this segment in the catalogue yet."
+            : "No gowns available yet."}
+        </Text>
       </View>
     );
   }
@@ -336,7 +414,9 @@ export function ARTryOnScreen({ route }) {
     >
       <View style={styles.header}>
         <Text style={styles.title}>AR Try-On</Text>
-        <Text style={styles.subtitle}>Pick a gown and align it on your camera preview.</Text>
+        <Text style={styles.subtitle}>
+          Pick a gown — it auto-fits to your shoulders and waist like the website try-on.
+        </Text>
         <View style={styles.headerActions}>
           <Pressable style={styles.headerBtn} onPress={() => setCameraFacing((v) => (v === "front" ? "back" : "front"))}>
             <Text style={styles.headerBtnText}>Flip Camera</Text>
@@ -366,68 +446,80 @@ export function ARTryOnScreen({ route }) {
             segmentationEnabled={segmentationNativeLinked && nativeSegmentationEnabled}
             segmentationFps={5}
             onSegmentationResult={onSegmentationResult}
+            brightenPreview
+            resizeMode="cover"
+            enablePinchZoom
           />
         ) : (
           <CameraView style={styles.camera} facing={cameraFacing} />
         )}
-        <Animated.View
-          style={[
-            styles.overlayMover,
-            {
-              transform: [
-                {
-                  translateX: autoFitEnabled && autoFit ? autoFit.translateX : overlayPan.x,
-                },
-                {
-                  translateY: autoFitEnabled && autoFit ? autoFit.translateY : overlayPan.y,
-                },
-                { scale: autoFitEnabled && autoFit ? autoFit.scale : overlayScale },
-              ],
-            },
-          ]}
-          onLayout={(e) => {
-            const { width, height } = e.nativeEvent.layout;
-            setOverlayLayout({ width, height });
-          }}
-          {...(!autoFitEnabled ? panResponder.panHandlers : {})}
-        >
-          {showNativePersonMask ? (
+        {useWebBodyFit ? (
+          <GownFittedOverlay
+            width={previewLayout.width}
+            height={previewLayout.height}
+            uri={tryonUri}
+            layout={liveGownLayout}
+            opacity={overlayOpacity}
+            landmarksNorm={landmarksForMask}
+            limbHoles={limbOcclusionEnabled && !showNativePersonMask}
+          />
+        ) : showNativePersonMask ? (
+          <View
+            style={styles.fullOverlay}
+            onLayout={(e) => {
+              const { width, height } = e.nativeEvent.layout;
+              setOverlayLayout({ width, height });
+            }}
+          >
             <GownNativeSegmentationOverlay
-              width={overlayLayout.width}
-              height={overlayLayout.height}
-              gownUri={selectedGown.image}
+              width={overlayLayout.width || previewLayout.width}
+              height={overlayLayout.height || previewLayout.height}
+              gownUri={tryonUri || selectedGown.image}
               maskDataUri={nativeMaskUri}
               opacity={overlayOpacity}
             />
-          ) : limbOcclusionEnabled &&
-            trackingLivePose &&
-            overlayLayout.width > 40 &&
-            overlayLayout.height > 40 ? (
-            <GownSvgOverlay
-              width={overlayLayout.width}
-              height={overlayLayout.height}
-              uri={selectedGown.image}
-              opacity={overlayOpacity}
-              landmarksNorm={landmarksForMask}
-              enabled
-            />
-          ) : (
+          </View>
+        ) : (
+          <Animated.View
+            style={[
+              styles.overlayMover,
+              {
+                transform: [
+                  { translateX: overlayPan.x },
+                  { translateY: overlayPan.y },
+                  { scale: overlayScale },
+                ],
+              },
+            ]}
+            onLayout={(e) => {
+              const { width, height } = e.nativeEvent.layout;
+              setOverlayLayout({ width, height });
+            }}
+            {...panResponder.panHandlers}
+          >
             <Image
-              source={{ uri: selectedGown.image }}
+              source={{ uri: tryonUri || selectedGown.image }}
               style={[styles.overlayImage, { opacity: overlayOpacity }]}
             />
-          )}
-        </Animated.View>
+          </Animated.View>
+        )}
         <View style={styles.overlayLabel}>
           <Text style={styles.overlayLabelText}>
-            {selectedGown.name} • {autoFitEnabled ? "Live pose + auto-fit" : "Drag to position"}
+            {selectedGown.name} •{" "}
+            {useWebBodyFit
+              ? "Fitted to your body"
+              : autoFitEnabled && canUseNativePose
+                ? tryonPoseIssues[0]
+                  ? "Step back — show full body"
+                  : "Finding your pose…"
+                : "Drag to position"}
           </Text>
         </View>
       </View>
 
       <View style={styles.controlsCard}>
         <View style={styles.controlRow}>
-          <Text style={styles.controlLabel}>Auto-Fit Beta</Text>
+          <Text style={styles.controlLabel}>Auto-fit to body</Text>
           <Pressable
             style={[styles.toggleBtn, autoFitEnabled ? styles.toggleBtnActive : null]}
             onPress={() => {
@@ -435,9 +527,10 @@ export function ARTryOnScreen({ route }) {
               setAutoFitEnabled(next);
               if (!next) {
                 setPoseDetected(false);
-                setLivePoseTransform(null);
+                setLiveGownLayout(null);
                 setLandmarksForMask(null);
-                poseSmoothRef.current = null;
+                setTryonPoseOk(false);
+                gownLayoutSmoothRef.current = null;
               }
             }}
           >
@@ -477,14 +570,16 @@ export function ARTryOnScreen({ route }) {
             ? Platform.OS === "web"
               ? "Web preview uses manual fit. Use iOS/Android dev build for live pose."
               : "Expo Go cannot run frame processors. Use a dev build (expo run:android) for live pose + limb masking."
-            : poseDetected
-              ? "iOS: Apple Vision person segmentation. Android: ML Kit selfie mask. Hides gown where you are so the camera shows through (rebuild app after adding native module)."
-              : autoFitEnabled
-                ? "Step into frame; seed sliders fine-tune until pose locks."
-                : "Auto-fit off — drag the gown and use size/opacity."}
+            : useWebBodyFit
+              ? "Gown follows your shoulders, waist, and legs — same as the website fitting room."
+              : poseDetected
+                ? "Tracking pose…"
+                : autoFitEnabled
+                  ? "Stand 1.5–2 m back, full body in frame, face the camera (not a mirror)."
+                  : "Auto-fit off — drag the gown and use size/opacity."}
         </Text>
 
-        {autoFitEnabled && (
+        {autoFitEnabled && !useWebBodyFit && (
           <>
             <View style={styles.controlRow}>
               <Text style={styles.controlLabel}>Body Center X</Text>
@@ -567,10 +662,10 @@ export function ARTryOnScreen({ route }) {
         </View>
       </View>
 
-      <Text style={styles.pickerTitle}>Choose Gown</Text>
+      <Text style={styles.pickerTitle}>Choose item</Text>
       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pickerRow} nestedScrollEnabled>
-        {gowns.map((g) => {
-          const active = idsEqual(g.id, selectedGown.id);
+        {catalogGowns.map((g) => {
+          const active = selectedGown && idsEqual(g.id, selectedGown.id);
           return (
             <Pressable
               key={g.id}
@@ -630,6 +725,9 @@ const styles = StyleSheet.create({
     backgroundColor: brand.white,
   },
   camera: { flex: 1 },
+  fullOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
   overlayMover: {
     position: "absolute",
     bottom: 0,

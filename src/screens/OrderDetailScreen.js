@@ -1,8 +1,8 @@
 import { useCallback, useState } from "react";
-import { Image, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Image, Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { useShop } from "../context/ShopContext";
-import { getOrderById } from "../services/orders";
+import { confirmOrderReceipt, getCustomerOrderById } from "../services/orders";
 import { brand } from "../theme/brand";
 import { formatDateTimePH } from "../utils/datetime";
 import { idsEqual } from "../utils/id";
@@ -15,29 +15,35 @@ function statusLabel(status) {
   return String(status || "placed").replace("_", " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-export function OrderDetailScreen({ route }) {
-  const { orderId } = route.params || {};
-  const { gowns } = useShop();
+export function OrderDetailScreen({ route, navigation }) {
+  const { orderId, orderNumber } = route.params || {};
+  const lookupKey = orderId || orderNumber;
+  const { gowns, user } = useShop();
   const [order, setOrder] = useState(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    const data = await getOrderById(orderId);
+    const data = user?.email && lookupKey
+      ? await getCustomerOrderById(lookupKey, user.email, user.id)
+      : null;
     setOrder(data || null);
     setLoading(false);
-  }, [orderId]);
+  }, [lookupKey, user?.email, user?.id]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const data = await getOrderById(orderId);
+      const data = user?.email && lookupKey
+        ? await getCustomerOrderById(lookupKey, user.email, user.id)
+        : null;
       setOrder(data || null);
     } finally {
       setRefreshing(false);
     }
-  }, [orderId]);
+  }, [lookupKey, user?.email, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
@@ -63,6 +69,10 @@ export function OrderDetailScreen({ route }) {
 
   const timeline = Array.isArray(order.statusTimeline) ? [...order.statusTimeline].reverse() : [];
   const items = Array.isArray(order.items) ? order.items : [];
+  const status = String(order?.status || "").toLowerCase();
+  const allowReturn = status === "completed";
+  const isShipped = status === "shipped";
+  const allowConfirmReceipt = status === "ready" || status === "shipped";
 
   return (
     <ScrollView 
@@ -114,6 +124,95 @@ export function OrderDetailScreen({ route }) {
           <Text style={styles.totalValue}>{formatPrice(order.total || order.subtotal)}</Text>
         </View>
       </View>
+
+      {isShipped && (order.lalamoveTrackingUrl || order.lalamoveEta || order.shipmentPhotoUrl) ? (
+        <View style={[styles.card, styles.shippingCard]}>
+          <Text style={[styles.cardTitle, { color: "#0c5460" }]}>Your order is on its way</Text>
+          {order.lalamoveEta ? (
+            <Text style={[styles.line, { color: "#0c5460" }]}>
+              <Text style={{ fontWeight: "700" }}>Estimated arrival: </Text>
+              {order.lalamoveEta}
+            </Text>
+          ) : null}
+          {order.lalamoveTrackingUrl ? (
+            <Pressable onPress={() => Linking.openURL(order.lalamoveTrackingUrl)} style={styles.trackBtn}>
+              <Text style={styles.trackBtnText}>Track your Lalamove delivery →</Text>
+            </Pressable>
+          ) : null}
+          {order.shipmentPhotoUrl ? (
+            <View style={{ marginTop: 10 }}>
+              <Text style={[styles.line, { fontWeight: "700", color: "#0a5276", marginBottom: 6 }]}>
+                Photo of your packed gown:
+              </Text>
+              <Pressable onPress={() => Linking.openURL(order.shipmentPhotoUrl)}>
+                <Image source={{ uri: order.shipmentPhotoUrl }} style={styles.shipmentPhoto} resizeMode="cover" />
+                <Text style={[styles.line, { fontSize: 10, color: "#0a5276", opacity: 0.7, marginTop: 2 }]}>
+                  Tap to view full image
+                </Text>
+              </Pressable>
+            </View>
+          ) : null}
+        </View>
+      ) : null}
+
+      {allowConfirmReceipt ? (
+        <View style={[styles.card, { borderColor: brand.buttonAlt }]}>
+          <Text style={styles.cardTitle}>Received your order?</Text>
+          <Text style={styles.meta}>Confirm once you have your gown in hand.</Text>
+          <Pressable
+            disabled={confirming}
+            style={[styles.returnBtn, { marginTop: 10, backgroundColor: brand.buttonAlt, opacity: confirming ? 0.7 : 1 }]}
+            onPress={() => {
+              Alert.alert("Confirm Receipt", "Are you sure you've received your order?", [
+                { text: "Cancel", style: "cancel" },
+                {
+                  text: "Yes, I've received it",
+                  onPress: async () => {
+                    if (!user?.id) {
+                      Alert.alert("Sign in required", "Please sign in first.");
+                      return;
+                    }
+                    setConfirming(true);
+                    try {
+                      const res = await confirmOrderReceipt(order.id, user.id);
+                      if (!res?.ok) {
+                        Alert.alert("Confirm failed", res?.error || "Could not confirm receipt.");
+                        return;
+                      }
+                      setOrder(res.order || { ...order, status: "completed" });
+                    } finally {
+                      setConfirming(false);
+                    }
+                  },
+                },
+              ]);
+            }}
+          >
+            <Text style={styles.returnBtnText}>{confirming ? "Confirming..." : "Yes, I've received my order"}</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {allowReturn ? (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Returns</Text>
+          <Text style={styles.meta}>
+            Need a return/refund/exchange? Submit a request and track the status.
+          </Text>
+          <Pressable
+            style={styles.returnBtn}
+            onPress={() => {
+              if (!user?.id) {
+                Alert.alert("Sign in required", "Please sign in to request a return.");
+                return;
+              }
+              navigation.navigate("ReturnRequest", { order });
+            }}
+          >
+            <Text style={styles.returnBtnText}>Request return</Text>
+          </Pressable>
+        </View>
+      ) : null}
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Shipment Tracking Timeline</Text>
@@ -175,5 +274,13 @@ const styles = StyleSheet.create({
   timelineTitle: { color: brand.dark, fontWeight: "800", fontSize: 13 },
   timelineMeta: { color: brand.textLight, fontSize: 12, marginTop: 1 },
   timelineNote: { color: brand.textLight, fontSize: 12, marginTop: 2, fontStyle: "italic" },
+
+  returnBtn: { marginTop: 10, backgroundColor: brand.button, borderRadius: 10, paddingVertical: 12 },
+  returnBtnText: { textAlign: "center", color: brand.white, fontWeight: "900" },
+
+  shippingCard: { backgroundColor: "#f0f7ff", borderColor: "#bdd7f5" },
+  trackBtn: { marginTop: 6, alignSelf: "flex-start" },
+  trackBtnText: { color: "#0c5460", textDecorationLine: "underline", fontSize: 12, fontWeight: "500" },
+  shipmentPhoto: { width: "100%", height: 180, borderRadius: 6, borderWidth: 1, borderColor: "#bdd7f5" },
 });
 

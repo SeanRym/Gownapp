@@ -26,6 +26,13 @@ export const API_BASE_URL = stripTrailingSlashes(
   extra.apiBaseUrl || process.env.EXPO_PUBLIC_API_BASE_URL || DEFAULT_API_BASE_URL
 );
 
+// Safety: if someone sets API_BASE_URL to localhost in a device build, warn loudly.
+if (String(API_BASE_URL).includes("localhost") || String(API_BASE_URL).includes("127.0.0.1")) {
+  console.warn(
+    "[apiEnv] API_BASE_URL points to localhost. Mobile will NOT sync with the deployed web backend. Set EXPO_PUBLIC_API_BASE_URL to the deployed server."
+  );
+}
+
 const envAdminSecret = String(
   extra.adminSecret || process.env.EXPO_PUBLIC_ADMIN_SECRET || DEFAULT_ADMIN_SECRET
 ).trim();

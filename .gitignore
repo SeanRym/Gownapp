@@ -42,3 +42,9 @@ yarn-error.*
 
 # IDE
 .idea/
+
+# Build directories
+android/build/
+packages/*/android/build/
+packages/*/ios/build/
+packages/*/build/

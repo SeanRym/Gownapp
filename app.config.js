@@ -45,6 +45,9 @@ module.exports = {
     ...appJson.expo,
     extra: {
       ...(appJson.expo?.extra || {}),
+      eas: {
+        projectId: "b85e90e0-4895-42e8-8464-0d1126ad2ddd",
+      },
       apiBaseUrl,
       adminSecret,
     },

@@ -116,7 +116,7 @@ export function HomeScreen({ navigation }) {
           />
         </Pressable>
 
-        <Pressable style={styles.cartBtn} onPress={() => navigation.navigate("Cart")}>
+        <Pressable style={styles.cartBtn} onPress={() => navigation.navigate("SavedGowns")}>
           <Ionicons name="cart" size={20} color={brand.dark} />
           {cartCount > 0 ? (
             <View style={styles.cartBadge}>
@@ -159,19 +159,22 @@ export function HomeScreen({ navigation }) {
         </View>
       ) : null}
 
-      <Pressable style={styles.arCta} onPress={() => navigation.navigate("AR Try-On")}>
+      <Pressable
+        style={styles.arCta}
+        onPress={() => navigation.navigate("Main", { screen: "FittingRoom" })}
+      >
         <View style={styles.arCtaHeader}>
           <View style={styles.arIconCircle}>
-            <Ionicons name="camera-outline" size={22} color={brand.dark} />
+            <Ionicons name="scan-outline" size={22} color={brand.dark} />
           </View>
-          <Text style={styles.arCtaBadge}>NEW • AR FEATURE</Text>
+          <Text style={styles.arCtaBadge}>MY FITTING ROOM</Text>
         </View>
         <Image source={{ uri: arImage }} style={styles.arImage} />
-        <Text style={styles.arCtaTitle}>Try on your gown in AR</Text>
-        <Text style={styles.arCtaText}>Stand in front of the camera and preview your dream look in seconds.</Text>
+        <Text style={styles.arCtaTitle}>Scan, size, style & try-on</Text>
+        <Text style={styles.arCtaText}>Same fitting studio as our website — measure, match sizes, find gowns, and AR preview.</Text>
         <View style={styles.arButtonRow}>
           <View style={styles.arPrimaryBtn}>
-            <Text style={styles.arPrimaryText}>START AR TRY‑ON</Text>
+            <Text style={styles.arPrimaryText}>OPEN FITTING STUDIO</Text>
           </View>
         </View>
       </Pressable>

@@ -1,5 +1,5 @@
 import { pushNotification } from "./notifications";
-import { normalizeId } from "../utils/id";
+import { normalizeId, orderMatchesKey } from "../utils/id";
 import { API_BASE_URL, adminAuthHeaders } from "../config/apiEnv";
 
 const STATUS_FLOW = ["placed", "paid", "processing", "shipped", "completed", "cancelled", "refunded"];
@@ -92,6 +92,13 @@ async function resolveBackendUser({ email, firstName, lastName, fullName }) {
   return userId;
 }
 
+/** Prefer ID from /api/auth/login; only call ensure-user (admin secret) when missing. */
+async function getBackendUserId({ email, firstName, lastName, sessionUserId }) {
+  const direct = String(sessionUserId || "").trim();
+  if (direct) return direct;
+  return resolveBackendUser({ email, firstName, lastName });
+}
+
 function mapOrderForMobile(order) {
   const contactName = String(order?.customerName || order?.contact?.name || "").trim();
   const parts = contactName.split(/\s+/).filter(Boolean);
@@ -124,9 +131,15 @@ function mapOrderForMobile(order) {
     };
   });
 
+  const orderNumber = String(order?.orderNumber || order?.order_number || "").trim() || null;
+  const id =
+    normalizeId(order?.id || order?.orderId || order?.order_id) ||
+    orderNumber ||
+    "";
+
   return {
-    id: normalizeId(order?.id),
-    orderNumber: String(order?.orderNumber || order?.order_number || "").trim() || null,
+    id,
+    orderNumber,
     status: String(order?.status || "placed").toLowerCase(),
     payment: String(order?.payment || order?.paymentMethod || "").toLowerCase(),
     paymentStatus: String(order?.paymentStatus || "").toLowerCase(),
@@ -173,7 +186,12 @@ export async function submitOrder(order) {
   const customerEmail = String(order?.contact?.email || "").trim().toLowerCase();
   const firstName = String(order?.contact?.firstName || "").trim();
   const lastName = String(order?.contact?.lastName || "").trim();
-  const userId = await resolveBackendUser({ email: customerEmail, firstName, lastName });
+  const userId = await getBackendUserId({
+    email: customerEmail,
+    firstName,
+    lastName,
+    sessionUserId: order?.userId,
+  });
 
   const deliveryMethodRaw = String(order?.delivery?.method || "pickup").toLowerCase();
   const deliveryMethod = deliveryMethodRaw === "delivery" ? "lalamove" : "pickup";
@@ -196,10 +214,15 @@ export async function submitOrder(order) {
     paymentMethod: String(order?.payment || "gcash").toLowerCase(),
     deliveryMethod,
     deliveryAddress: String(order?.delivery?.address || "").trim(),
+    lalamoveVehicle:
+      deliveryMethod === "lalamove"
+        ? String(order?.delivery?.lalamoveVehicle || order?.lalamoveVehicle || "sedan").trim().toLowerCase()
+        : null,
     items,
     subtotal: Number(order?.subtotal || 0),
+    shippingFee: Number(order?.shipping?.shippingFee || order?.shippingFee || 0),
     total: Number(order?.total || order?.subtotal || 0),
-    notes: "",
+    notes: String(order?.notes || "").trim(),
   };
 
   const created = await requestJson("/api/orders", {
@@ -212,10 +235,12 @@ export async function submitOrder(order) {
   });
 
   const freshOrders = await fetchMyOrdersByUserId(userId);
-  const newId = normalizeId(created?.orderId);
-  const placedOrder = freshOrders.find((x) => normalizeId(x.id) === newId) || {
+  const newId =
+    normalizeId(created?.orderId || created?.id || created?.order?.id) ||
+    normalizeId(created?.orderNumber || created?.order_number);
+  const placedOrder = freshOrders.find((x) => orderMatchesKey(x, newId)) || {
     id: newId,
-    orderNumber: created?.orderNumber || null,
+    orderNumber: created?.orderNumber || created?.order_number || null,
     ...mapOrderForMobile({
       id: newId,
       orderNumber: created?.orderNumber,
@@ -240,13 +265,23 @@ export async function submitOrder(order) {
   return { ok: true, order: placedOrder };
 }
 
-export async function getOrdersByEmail(email) {
+export async function getOrdersByEmail(email, sessionUserId) {
   try {
-    const userId = await resolveBackendUser({ email });
+    const userId = await getBackendUserId({ email, sessionUserId });
     return await fetchMyOrdersByUserId(userId);
   } catch {
     return [];
   }
+}
+
+function findOrderInList(orders, key) {
+  const list = Array.isArray(orders) ? orders : [];
+  return list.find((x) => orderMatchesKey(x, key)) || null;
+}
+
+export async function getCustomerOrderById(orderKey, email, sessionUserId) {
+  const orders = await getOrdersByEmail(email, sessionUserId);
+  return findOrderInList(orders, orderKey);
 }
 
 export async function getAllOrdersAdmin() {
@@ -260,24 +295,40 @@ export async function getAllOrdersAdmin() {
   }
 }
 
-export async function getOrderById(orderId) {
-  const targetId = normalizeId(orderId);
-  if (!targetId) return null;
+export async function getOrderById(orderKey) {
+  const target = normalizeId(orderKey);
+  if (!target) return null;
   const data = await getAllOrdersAdmin();
-  return data.find((x) => normalizeId(x?.id) === targetId) || null;
+  return findOrderInList(data, target);
 }
 
 export function getOrderStatusOptions() {
   return STATUS_FLOW;
 }
 
-export async function submitOrderPaymentProof(orderId, payload) {
+export async function submitOrderPaymentProof(orderKey, payload, sessionUserId) {
   try {
-    const current = await getOrderById(orderId);
-    if (!current) return { ok: false, error: "Order not found." };
+    const email = String(payload?.email || "").trim().toLowerCase();
+    const userId = await getBackendUserId({ email, sessionUserId });
+    const lookupKey =
+      normalizeId(orderKey) ||
+      normalizeId(payload?.orderNumber) ||
+      normalizeId(payload?.fallbackOrder?.id) ||
+      normalizeId(payload?.fallbackOrder?.orderNumber);
+    if (!lookupKey) return { ok: false, error: "Missing order reference." };
 
-    const email = String(current?.contact?.email || "").trim().toLowerCase();
-    const userId = await resolveBackendUser({ email });
+    let current = payload?.fallbackOrder || null;
+    if (userId) {
+      const mine = await fetchMyOrdersByUserId(userId);
+      current = findOrderInList(mine, lookupKey) || current;
+    }
+    if (!current) {
+      current = await getOrderById(lookupKey);
+    }
+
+    const proofOrderId =
+      normalizeId(current?.id) ||
+      normalizeId(lookupKey);
     const image = String(payload?.imageUri || "").trim();
     const referenceNo = String(payload?.referenceNumber || "").trim();
 
@@ -288,14 +339,33 @@ export async function submitOrderPaymentProof(orderId, payload) {
         "x-user-id": String(userId),
       },
       body: JSON.stringify({
-        orderId: normalizeId(orderId),
+        orderId: proofOrderId,
+        orderNumber: normalizeId(current?.orderNumber || payload?.orderNumber) || undefined,
         image,
         referenceNo,
       }),
     });
 
-    const latest = await getOrderById(orderId);
-    return { ok: true, order: latest || current };
+    const proofPatch = {
+      imageUri: image,
+      referenceNumber: referenceNo,
+      submittedAt: new Date().toISOString(),
+    };
+    const merged = current
+      ? {
+          ...current,
+          paymentProofStatus: "pending",
+          paymentProof: { ...(current.paymentProof || {}), ...proofPatch },
+        }
+      : null;
+
+    if (userId) {
+      const mine = await fetchMyOrdersByUserId(userId);
+      const latest = findOrderInList(mine, lookupKey);
+      return { ok: true, order: latest || merged };
+    }
+    const latest = await getOrderById(lookupKey);
+    return { ok: true, order: latest || merged };
   } catch (e) {
     return { ok: false, error: e?.message || "Could not submit payment proof." };
   }
@@ -343,6 +413,23 @@ export async function updateOrderStatusAdmin(orderId, nextStatus) {
     return { ok: true, order: latest };
   } catch (e) {
     return { ok: false, error: e?.message || "Could not update order status." };
+  }
+}
+
+export async function confirmOrderReceipt(orderId, userId) {
+  const normalizedOrderId = normalizeId(orderId);
+  if (!normalizedOrderId) return { ok: false, error: "Missing order id." };
+  if (!userId) return { ok: false, error: "Sign in required." };
+  try {
+    await requestJson("/api/orders", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-user-id": String(userId) },
+      body: JSON.stringify({ orderId: normalizedOrderId, status: "completed" }),
+    });
+    const latest = await getOrderById(normalizedOrderId);
+    return { ok: true, order: latest };
+  } catch (e) {
+    return { ok: false, error: e?.message || "Could not confirm receipt." };
   }
 }
 

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useShop } from "../context/ShopContext";
 import { submitOrder } from "../services/orders";
 import { calculateShipping } from "../services/shipping";
+import { DEFAULT_LALAMOVE_VEHICLE, estimateLalamoveFeeFromAddress, LALAMOVE_VEHICLES } from "../services/lalamoveEstimate";
 import { loadCheckoutProfiles, saveCheckoutProfiles } from "../utils/storage";
 import { brand } from "../theme/brand";
 
@@ -10,11 +11,28 @@ function formatPrice(n) {
   return `P${Number(n).toLocaleString("en-PH")}`;
 }
 
-export function CheckoutScreen({ navigation }) {
-  const { cartDetailed, subtotal, clearCart, user, reloadGowns } = useShop();
+export function CheckoutScreen({ navigation, route }) {
+  const { cartDetailed, subtotal, clearCart, removePurchasedLines, user, reloadGowns } = useShop();
+  const lineKeys = route?.params?.lineKeys;
+  const fittingNote = String(route?.params?.fittingNote || "").trim();
+
+  const checkoutItems = useMemo(() => {
+    if (!Array.isArray(lineKeys) || lineKeys.length === 0) return cartDetailed;
+    const set = new Set(lineKeys);
+    return cartDetailed.filter((i) => set.has(i.lineKey));
+  }, [cartDetailed, lineKeys]);
+
+  const checkoutSubtotal = useMemo(
+    () => checkoutItems.reduce((sum, item) => sum + item.subtotal, 0),
+    [checkoutItems]
+  );
   const [step, setStep] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [deliveryMethod, setDeliveryMethod] = useState("pickup");
+  const [lalamoveVehicle, setLalamoveVehicle] = useState(DEFAULT_LALAMOVE_VEHICLE);
+  const [lalamoveFee, setLalamoveFee] = useState(0);
+  const [lalamoveLoading, setLalamoveLoading] = useState(false);
+  const [lalamoveError, setLalamoveError] = useState("");
   const [payment, setPayment] = useState("gcash");
   const [showTerms, setShowTerms] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
@@ -28,9 +46,12 @@ export function CheckoutScreen({ navigation }) {
     province: "",
     zip: "",
   });
-  const shipping = useMemo(() => calculateShipping({ province: form.province, subtotal }), [form.province, subtotal]);
-  const deliveryFee = deliveryMethod === "pickup" ? 0 : shipping.shippingFee;
-  const grandTotal = subtotal + deliveryFee;
+  const shipping = useMemo(
+    () => calculateShipping({ province: form.province, subtotal: checkoutSubtotal }),
+    [form.province, checkoutSubtotal]
+  );
+  const deliveryFee = deliveryMethod === "pickup" ? 0 : lalamoveFee;
+  const grandTotal = checkoutSubtotal + deliveryFee;
   const steps = ["Review", "Delivery", "Payment", "Confirm"];
 
   const onChange = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
@@ -68,8 +89,8 @@ export function CheckoutScreen({ navigation }) {
   }, [user?.email]);
 
   const validateReviewStep = () => {
-    if (cartDetailed.length === 0) {
-      Alert.alert("Cart empty", "Please add at least one item before checkout.");
+    if (checkoutItems.length === 0) {
+      Alert.alert("Nothing to checkout", "Please add at least one gown to your fitting room.");
       return false;
     }
     return true;
@@ -91,6 +112,30 @@ export function CheckoutScreen({ navigation }) {
     return true;
   };
 
+  useEffect(() => {
+    if (deliveryMethod !== "delivery") return;
+    const addr = String(form.address || "").trim();
+    if (!addr) return;
+    const t = setTimeout(async () => {
+      setLalamoveLoading(true);
+      setLalamoveError("");
+      try {
+        const res = await estimateLalamoveFeeFromAddress(addr, lalamoveVehicle);
+        if (res?.ok) {
+          setLalamoveFee(Number(res.fee || 0));
+        } else {
+          const flat = { motorcycle: 100, sedan: 250, suv: 300 };
+          const fee = flat[lalamoveVehicle] ?? 250;
+          setLalamoveFee(fee);
+          setLalamoveError("Could not locate address — using flat estimate. Final fare set by Lalamove.");
+        }
+      } finally {
+        setLalamoveLoading(false);
+      }
+    }, 900);
+    return () => clearTimeout(t);
+  }, [deliveryMethod, form.address, lalamoveVehicle]);
+
   const nextStep = () => {
     if (step === 0 && !validateReviewStep()) return;
     if (step === 1 && !validateDeliveryStep()) return;
@@ -103,7 +148,7 @@ export function CheckoutScreen({ navigation }) {
   };
 
   const placeOrder = async () => {
-    if (cartDetailed.length === 0) return;
+    if (checkoutItems.length === 0) return;
     if (!validateConfirmStep()) return;
     if (!termsAccepted) {
       Alert.alert("Terms required", "Please read and agree to the Terms & Conditions before placing your order.");
@@ -132,6 +177,7 @@ export function CheckoutScreen({ navigation }) {
         });
       }
       const response = await submitOrder({
+        userId: user?.id,
         contact: {
           email: form.email,
           firstName: form.firstName,
@@ -144,9 +190,10 @@ export function CheckoutScreen({ navigation }) {
           province: form.province,
           zip: form.zip,
           method: deliveryMethod,
+          lalamoveVehicle: deliveryMethod === "delivery" ? lalamoveVehicle : null,
         },
         payment,
-        items: cartDetailed.map((i) => ({
+        items: checkoutItems.map((i) => ({
           id: i.id,
           name: i.name,
           image: i.image,
@@ -155,7 +202,8 @@ export function CheckoutScreen({ navigation }) {
           price: i.price,
           subtotal: i.subtotal,
         })),
-        subtotal,
+        subtotal: checkoutSubtotal,
+        notes: fittingNote,
         shipping: {
           ...shipping,
           shippingFee: deliveryFee,
@@ -164,10 +212,20 @@ export function CheckoutScreen({ navigation }) {
         total: grandTotal,
         createdAt: new Date().toISOString(),
       });
-      await clearCart();
+      const purchasedLineKeys = checkoutItems.map((item) => item.lineKey).filter(Boolean);
+      if (purchasedLineKeys.length > 0) {
+        const removeResult = await removePurchasedLines(purchasedLineKeys);
+        if (!removeResult?.ok) {
+          throw new Error(removeResult?.reason || "Order saved but failed to update cart.");
+        }
+      } else {
+        await clearCart();
+      }
       await reloadGowns();
       navigation.replace("OrderPlaced", {
-        orderId: response?.order?.id,
+        orderId: response?.order?.id || response?.order?.orderNumber,
+        orderNumber: response?.order?.orderNumber,
+        order: response?.order,
       });
     } catch (e) {
       Alert.alert("Order failed", e.message);
@@ -204,7 +262,7 @@ export function CheckoutScreen({ navigation }) {
         {step === 0 ? (
           <>
             <Text style={styles.sectionTitle}>Review your order</Text>
-            {cartDetailed.map((item) => (
+            {checkoutItems.map((item) => (
               <View key={item.id} style={styles.lineItem}>
                 <Image source={{ uri: item.image }} style={styles.lineThumb} />
                 <View style={styles.lineMeta}>
@@ -230,7 +288,7 @@ export function CheckoutScreen({ navigation }) {
             <Pressable style={[styles.optionCard, deliveryMethod === "delivery" ? styles.optionCardActive : null]} onPress={() => setDeliveryMethod("delivery")}>
               <View style={styles.optionTopRow}>
                 <Text style={styles.optionTitle}>Lalamove</Text>
-                <Text style={styles.optionMeta}>Quote on address</Text>
+                <Text style={styles.optionMeta}>{lalamoveFee > 0 ? `~${formatPrice(lalamoveFee)}` : "Estimate"}</Text>
               </View>
               <Text style={styles.optionDesc}>Same-day city dispatch (where available)</Text>
             </Pressable>
@@ -252,8 +310,30 @@ export function CheckoutScreen({ navigation }) {
                   multiline
                   textAlignVertical="top"
                 />
+                <Text style={styles.label}>Vehicle</Text>
+                <View style={styles.vehicleRow}>
+                  {LALAMOVE_VEHICLES.filter((v) => v.id !== "motorcycle").map((v) => (
+                    <Pressable
+                      key={v.id}
+                      style={[styles.vehiclePill, lalamoveVehicle === v.id ? styles.vehiclePillOn : null]}
+                      onPress={() => setLalamoveVehicle(v.id)}
+                    >
+                      <Text style={[styles.vehicleText, lalamoveVehicle === v.id ? styles.vehicleTextOn : null]}>
+                        {v.labelShort}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+                {lalamoveLoading ? <Text style={styles.deliveryHint}>Computing shipping estimate…</Text> : null}
+                {!lalamoveLoading && lalamoveFee > 0 ? (
+                  <Text style={styles.deliveryHint}>
+                    {LALAMOVE_VEHICLES.find((v) => v.id === lalamoveVehicle)?.labelShort || "Sedan"} estimate:{" "}
+                    <Text style={styles.deliveryStrong}>{formatPrice(lalamoveFee)}</Text>
+                  </Text>
+                ) : null}
+                {lalamoveError ? <Text style={styles.deliveryWarn}>{lalamoveError}</Text> : null}
                 <Text style={styles.deliveryHint}>
-                  Lalamove delivery fee will be computed based on rider quote and actual delivery distance.
+                  Estimate is based on straight-line distance from our store. The actual Lalamove fee may vary slightly and will be confirmed before dispatch.
                 </Text>
               </>
             ) : null}
@@ -318,7 +398,7 @@ export function CheckoutScreen({ navigation }) {
             <Text style={styles.sectionTitle}>Review & place order</Text>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Items subtotal</Text>
-              <Text style={styles.summaryValue}>{formatPrice(subtotal)}</Text>
+              <Text style={styles.summaryValue}>{formatPrice(checkoutSubtotal)}</Text>
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Delivery</Text>
@@ -352,7 +432,7 @@ export function CheckoutScreen({ navigation }) {
 
       <View style={styles.summaryCard}>
         <Text style={styles.summaryTitle}>Order Summary</Text>
-        {cartDetailed.map((item, index) => (
+        {checkoutItems.map((item, index) => (
           <View key={`summary-${item.id}-${index}`} style={styles.summaryItemRow}>
             <Image source={{ uri: item.image }} style={styles.summaryThumb} />
             <View style={styles.summaryItemMeta}>
@@ -365,7 +445,7 @@ export function CheckoutScreen({ navigation }) {
         <View style={styles.summaryLine} />
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Subtotal</Text>
-          <Text style={styles.summaryValue}>{formatPrice(subtotal)}</Text>
+          <Text style={styles.summaryValue}>{formatPrice(checkoutSubtotal)}</Text>
         </View>
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Delivery fee</Text>
@@ -510,6 +590,13 @@ const styles = StyleSheet.create({
   noticeText: { color: brand.text, fontSize: 12, lineHeight: 18 },
   noticeStrong: { fontWeight: "700", color: brand.dark },
   label: { color: brand.dark, fontWeight: "700", marginTop: 8, marginBottom: 3, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.8 },
+  vehicleRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", marginBottom: 2 },
+  vehiclePill: { borderWidth: 1, borderColor: brand.border, backgroundColor: brand.white, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 12 },
+  vehiclePillOn: { borderColor: "#0c5460", backgroundColor: "#f0f7ff" },
+  vehicleText: { color: brand.dark, fontWeight: "800", fontSize: 12 },
+  vehicleTextOn: { color: "#0c5460" },
+  deliveryStrong: { fontWeight: "900", color: "#0c5460" },
+  deliveryWarn: { color: "#856404", marginTop: 6, fontSize: 12 },
   input: { borderWidth: 1, borderColor: brand.border, padding: 11, marginBottom: 8, backgroundColor: brand.white, borderRadius: 8 },
   addressInput: { minHeight: 72 },
   deliveryHint: { color: brand.textLight, fontSize: 11, marginTop: -2, marginBottom: 4 },

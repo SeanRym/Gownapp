@@ -1,9 +1,11 @@
 import { useCallback, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
-import { getOrderById } from "../services/orders";
+import { useShop } from "../context/ShopContext";
+import { getCustomerOrderById } from "../services/orders";
 import { brand } from "../theme/brand";
 import { formatDateTimePH } from "../utils/datetime";
+import { orderMatchesKey } from "../utils/id";
 
 function formatPrice(num) {
   return `P${Number(num || 0).toLocaleString("en-PH")}`;
@@ -17,24 +19,34 @@ function paymentLabel(payment) {
 }
 
 export function OrderProofSubmittedScreen({ route, navigation }) {
-  const { orderId } = route.params || {};
-  const [order, setOrder] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const { user } = useShop();
+  const { orderId, orderNumber, order: initialOrder } = route.params || {};
+  const lookupKey = orderId || orderNumber;
+  const [order, setOrder] = useState(initialOrder || null);
+  const [loading, setLoading] = useState(!initialOrder);
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
       (async () => {
+        if (initialOrder && (!lookupKey || orderMatchesKey(initialOrder, lookupKey))) {
+          if (!active) return;
+          setOrder(initialOrder);
+          setLoading(false);
+          return;
+        }
         setLoading(true);
-        const data = await getOrderById(orderId);
+        const data = user?.email && lookupKey
+          ? await getCustomerOrderById(lookupKey, user.email, user.id)
+          : null;
         if (!active) return;
-        setOrder(data || null);
+        setOrder(data || initialOrder || null);
         setLoading(false);
       })();
       return () => {
         active = false;
       };
-    }, [orderId])
+    }, [initialOrder, lookupKey, orderNumber, user?.email, user?.id])
   );
 
   if (loading) {
@@ -127,6 +139,17 @@ export function OrderProofSubmittedScreen({ route, navigation }) {
         </View>
       </View>
 
+      <Pressable
+        style={styles.linkBtn}
+        onPress={() =>
+          navigation.navigate("OrderDetail", {
+            orderId: order.id || order.orderNumber,
+            orderNumber: order.orderNumber,
+          })
+        }
+      >
+        <Text style={styles.linkText}>View full order details →</Text>
+      </Pressable>
       <Pressable style={styles.linkBtn} onPress={() => navigation.navigate("MyOrders")}>
         <Text style={styles.linkText}>View all orders →</Text>
       </Pressable>

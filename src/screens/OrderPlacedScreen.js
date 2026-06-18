@@ -2,9 +2,11 @@ import { useCallback, useState } from "react";
 import { Alert, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import * as ImagePicker from "expo-image-picker";
-import { getOrderById, submitOrderPaymentProof } from "../services/orders";
+import { useShop } from "../context/ShopContext";
+import { getCustomerOrderById, submitOrderPaymentProof } from "../services/orders";
 import { brand } from "../theme/brand";
 import { formatDateTimePH } from "../utils/datetime";
+import { normalizeId, orderMatchesKey } from "../utils/id";
 
 function formatPrice(num) {
   return `P${Number(num || 0).toLocaleString("en-PH")}`;
@@ -18,9 +20,11 @@ function paymentLabel(payment) {
 }
 
 export function OrderPlacedScreen({ route, navigation }) {
-  const { orderId } = route.params || {};
-  const [order, setOrder] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const { user } = useShop();
+  const { orderId, orderNumber, order: initialOrder } = route.params || {};
+  const lookupKey = orderId || orderNumber;
+  const [order, setOrder] = useState(initialOrder || null);
+  const [loading, setLoading] = useState(!initialOrder);
   const [proofImageUri, setProofImageUri] = useState("");
   const [referenceNumber, setReferenceNumber] = useState("");
   const [submittingProof, setSubmittingProof] = useState(false);
@@ -29,8 +33,18 @@ export function OrderPlacedScreen({ route, navigation }) {
     useCallback(() => {
       let active = true;
       (async () => {
+        if (initialOrder && (!lookupKey || orderMatchesKey(initialOrder, lookupKey))) {
+          if (!active) return;
+          setOrder(initialOrder);
+          setProofImageUri(String(initialOrder?.paymentProof?.imageUri || ""));
+          setReferenceNumber(String(initialOrder?.paymentProof?.referenceNumber || ""));
+          setLoading(false);
+          return;
+        }
         setLoading(true);
-        const data = await getOrderById(orderId);
+        const data = user?.email && lookupKey
+          ? await getCustomerOrderById(lookupKey, user.email, user.id)
+          : null;
         if (!active) return;
         setOrder(data || null);
         setProofImageUri(String(data?.paymentProof?.imageUri || ""));
@@ -40,7 +54,7 @@ export function OrderPlacedScreen({ route, navigation }) {
       return () => {
         active = false;
       };
-    }, [orderId])
+    }, [initialOrder, lookupKey, user?.email, user?.id])
   );
 
   const pickProofImage = useCallback(async () => {
@@ -71,22 +85,35 @@ export function OrderPlacedScreen({ route, navigation }) {
     }
     setSubmittingProof(true);
     try {
-      const result = await submitOrderPaymentProof(order.id, {
-        imageUri: proofImageUri,
-        referenceNumber,
-      });
+      const orderKey = normalizeId(order?.id) || normalizeId(order?.orderNumber);
+      const result = await submitOrderPaymentProof(
+        orderKey,
+        {
+          email: user?.email || order?.contact?.email,
+          orderNumber: order?.orderNumber,
+          imageUri: proofImageUri,
+          referenceNumber,
+          fallbackOrder: order,
+        },
+        user?.id
+      );
       if (!result?.ok) {
         Alert.alert("Submit failed", result?.error || "Could not submit payment proof.");
         return;
       }
-      setOrder(result.order);
-      navigation.replace("OrderProofSubmitted", { orderId: order.id });
+      const confirmed = result.order || order;
+      setOrder(confirmed);
+      navigation.replace("OrderProofSubmitted", {
+        orderId: normalizeId(confirmed?.id) || orderKey,
+        orderNumber: confirmed?.orderNumber || order?.orderNumber,
+        order: confirmed,
+      });
     } catch (e) {
       Alert.alert("Submit failed", e?.message || "Could not submit payment proof.");
     } finally {
       setSubmittingProof(false);
     }
-  }, [navigation, order?.id, proofImageUri, referenceNumber]);
+  }, [navigation, order?.contact?.email, order?.id, proofImageUri, referenceNumber, user?.email, user?.id]);
 
   if (loading) {
     return (
@@ -227,6 +254,17 @@ export function OrderPlacedScreen({ route, navigation }) {
         </View>
       </View>
 
+      <Pressable
+        style={styles.linkBtn}
+        onPress={() =>
+          navigation.navigate("OrderDetail", {
+            orderId: order.id || order.orderNumber,
+            orderNumber: order.orderNumber,
+          })
+        }
+      >
+        <Text style={styles.linkText}>View full order details →</Text>
+      </Pressable>
       <Pressable style={styles.linkBtn} onPress={() => navigation.navigate("MyOrders")}>
         <Text style={styles.linkText}>View all orders →</Text>
       </Pressable>

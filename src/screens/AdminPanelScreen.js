@@ -91,6 +91,13 @@ export function AdminPanelScreen({ navigation }) {
       allowed: canAccess(user, "admin_orders"),
     },
     {
+      key: "returns",
+      title: "Returns",
+      desc: "Manage return requests.",
+      route: "AdminReturns",
+      allowed: canAccess(user, "admin_orders"),
+    },
+    {
       key: "sales",
       title: "Sales dashboard",
       desc: "Review charts and analytics.",

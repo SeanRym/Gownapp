@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { StyleSheet } from "react-native";
 import { detectPose } from "@scottjgilroy/react-native-vision-camera-v4-pose-detection/lib/module/detectPose";
 import { detectNativePersonSegmentation } from "vision-camera-native-segmentation";
@@ -7,31 +7,53 @@ import {
   useCameraDevice,
   useCameraFormat,
   useFrameProcessor,
-  runAsync,
   runAtTargetFps,
 } from "react-native-vision-camera";
 import { useRunOnJS } from "react-native-worklets-core";
 
 const POSE_OPTIONS = { mode: "stream", performanceMode: "max" };
 
+function brighterExposure(device) {
+  if (device?.minExposure == null || device?.maxExposure == null) return undefined;
+  const { minExposure, maxExposure } = device;
+  return minExposure + (maxExposure - minExposure) * 0.4;
+}
+
 /**
- * VisionCamera + throttled ML Kit pose; optional native person segmentation (Apple Vision / ML Kit selfie).
+ * VisionCamera + ML Kit pose. Matches package example: detectPose in worklet (no runAsync).
  */
 export function NativePoseCamera({
   facing,
   isActive,
   onPoseMap,
   onVideoDimensions,
-  targetFps = 12,
+  targetFps = 15,
   segmentationEnabled = false,
   segmentationFps = 5,
   onSegmentationResult,
+  torch = false,
+  brightenPreview = true,
+  resizeMode = "contain",
+  enablePinchZoom = true,
 }) {
   const device = useCameraDevice(facing === "front" ? "front" : "back");
+
   const format = useCameraFormat(device, [
-    { videoResolution: { width: 720, height: 1280 } },
     { fps: 30 },
+    { videoResolution: { width: 720, height: 1280 } },
   ]);
+
+  const exposure = useMemo(
+    () => (brightenPreview ? brighterExposure(device) : undefined),
+    [brightenPreview, device]
+  );
+
+  const zoom = useMemo(() => {
+    if (!device) return 1;
+    const min = device.minZoom ?? 1;
+    const neutral = device.neutralZoom ?? 1;
+    return Math.max(min, Math.min(neutral, min * 1.05));
+  }, [device]);
 
   useEffect(() => {
     const w = format?.videoWidth;
@@ -44,8 +66,8 @@ export function NativePoseCamera({
   const onSegRef = useRef(onSegmentationResult);
   onSegRef.current = onSegmentationResult;
 
-  const emitPose = useRunOnJS((map) => {
-    onPoseRef.current?.(map);
+  const emitPose = useRunOnJS((payload) => {
+    onPoseRef.current?.(payload);
   }, []);
 
   const emitSeg = useRunOnJS((result) => {
@@ -57,35 +79,33 @@ export function NativePoseCamera({
       "worklet";
       runAtTargetFps(targetFps, () => {
         "worklet";
-        runAsync(frame, () => {
-          "worklet";
-          try {
-            const data = detectPose(frame, POSE_OPTIONS);
-            emitPose(data);
-          } catch {
-            emitPose(null);
-          }
-        });
+        try {
+          const data = detectPose(frame, POSE_OPTIONS);
+          emitPose({
+            pose: data,
+            imageWidth: frame.width,
+            imageHeight: frame.height,
+          });
+        } catch (e) {
+          emitPose({ error: String(e?.message || "pose_plugin_error") });
+        }
       });
       if (segmentationEnabled) {
         runAtTargetFps(segmentationFps, () => {
           "worklet";
-          runAsync(frame, () => {
-            "worklet";
-            try {
-              const seg = detectNativePersonSegmentation(frame, {});
-              emitSeg(seg);
-            } catch {
-              emitSeg({ error: "segmentation_failed" });
-            }
-          });
+          try {
+            const seg = detectNativePersonSegmentation(frame, {});
+            emitSeg(seg);
+          } catch {
+            emitSeg({ error: "segmentation_failed" });
+          }
         });
       }
     },
     [emitPose, emitSeg, segmentationEnabled, segmentationFps, targetFps]
   );
 
-  const pixelFormat = format?.pixelFormats?.includes?.("yuv") ? "yuv" : undefined;
+  const torchOn = Boolean(torch && device?.hasTorch);
 
   if (!device) return null;
 
@@ -93,11 +113,16 @@ export function NativePoseCamera({
     <Camera
       style={StyleSheet.absoluteFill}
       device={device}
-      isActive={isActive}
+      isActive={Boolean(isActive)}
       format={format}
-      pixelFormat={pixelFormat}
       frameProcessor={frameProcessor}
       enableFpsGraph={false}
+      torch={torchOn ? "on" : "off"}
+      exposure={exposure}
+      zoom={zoom}
+      enableZoomGesture={enablePinchZoom}
+      resizeMode={resizeMode}
+      fps={30}
     />
   );
 }
