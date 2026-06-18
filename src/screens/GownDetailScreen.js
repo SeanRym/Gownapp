@@ -4,6 +4,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useShop } from "../context/ShopContext";
 import { brand } from "../theme/brand";
 import { idsEqual, normalizeId } from "../utils/id";
+import { handleToggleFavorite } from "../utils/favoritePress";
 import { trackInteraction, getRecommendationsForGown } from "../services/recommendations";
 
 export function GownDetailScreen({ route, navigation }) {
@@ -81,7 +82,7 @@ export function GownDetailScreen({ route, navigation }) {
       <View style={styles.infoCard}>
         <View style={styles.infoHeader}>
           <Text style={styles.title}>{gown.name}</Text>
-          <Pressable style={styles.favBtn} onPress={() => toggleFavorite(gown.id)}>
+          <Pressable style={styles.favBtn} onPress={() => handleToggleFavorite(toggleFavorite, gown.id, navigation)}>
             <Ionicons name={liked ? "heart" : "heart-outline"} size={20} color={liked ? brand.buttonAlt : brand.textLight} />
           </Pressable>
         </View>

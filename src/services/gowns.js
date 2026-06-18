@@ -146,15 +146,65 @@ export async function getAllGownsAdmin() {
   }
 }
 
+export async function uploadAdminTryonImage(localUri) {
+  const uri = String(localUri || "").trim();
+  if (!uri) return { ok: false, error: "No image selected." };
+  if (/^https?:\/\//i.test(uri)) return { ok: true, url: uri };
+
+  const name = uri.split("/").pop()?.split("?")[0] || `upload-${Date.now()}.jpg`;
+  const lower = name.toLowerCase();
+  const type = lower.endsWith(".png") ? "image/png" : lower.endsWith(".webp") ? "image/webp" : "image/jpeg";
+
+  const form = new FormData();
+  form.append("file", { uri, name, type });
+
+  const response = await fetch(makeUrl("/api/admin/upload-tryon-image"), {
+    method: "POST",
+    headers: adminAuthHeaders(),
+    body: form,
+  });
+  let body = null;
+  try {
+    body = await response.json();
+  } catch {
+    body = null;
+  }
+  if (!response.ok || !body?.ok) {
+    return { ok: false, error: body?.error || `Upload failed (${response.status}).` };
+  }
+  return { ok: true, url: String(body.url || "").trim() };
+}
+
+async function resolveRemoteImageUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  if (raw.startsWith("file:") || raw.startsWith("content:") || raw.startsWith("ph://") || raw.startsWith("assets-library:")) {
+    const uploaded = await uploadAdminTryonImage(raw);
+    if (!uploaded.ok) throw new Error(uploaded.error || "Image upload failed.");
+    return uploaded.url;
+  }
+  return raw;
+}
+
 export async function upsertGownAdmin(payload) {
   try {
     const id = String(payload?.id || "").trim();
+    const [image, tryonImage, tryonImageBack, additionalImage1] = await Promise.all([
+      resolveRemoteImageUrl(payload?.image),
+      resolveRemoteImageUrl(payload?.tryonImage),
+      resolveRemoteImageUrl(payload?.tryonImageBack),
+      resolveRemoteImageUrl(payload?.additionalImage1),
+    ]);
     const body = {
       id: id || undefined,
       name: String(payload?.name || "").trim(),
       price: String(payload?.price || "").trim() || "P0",
-      image: String(payload?.image || "").trim(),
+      image,
       alt: String(payload?.alt || "").trim(),
+      tryonImage: tryonImage || image,
+      tryonImageBack: tryonImageBack || null,
+      tryonCalibration: payload?.tryonCalibration ?? null,
       type: String(payload?.type || "Gowns").trim(),
       color: String(payload?.color || "").trim(),
       silhouette: String(payload?.silhouette || "").trim(),
@@ -165,6 +215,9 @@ export async function upsertGownAdmin(payload) {
       promoPrice: String(payload?.promoPrice || "").trim(),
       inventory: buildInventoryList(payload?.sizeInventory),
     };
+    if (additionalImage1) {
+      body.additionalImages = [additionalImage1];
+    }
     const method = id ? "PUT" : "POST";
     const data = await requestJson("/api/admin/gowns", {
       method,

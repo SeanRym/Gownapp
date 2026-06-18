@@ -137,13 +137,26 @@ function mapOrderForMobile(order) {
     orderNumber ||
     "";
 
+  const deliveryMethodRaw = String(order?.deliveryMethod || order?.delivery?.method || "pickup").toLowerCase();
+  const deliveryMethod = deliveryMethodRaw === "delivery" ? "lalamove" : deliveryMethodRaw;
+  const statusHistory = Array.isArray(order?.statusHistory)
+    ? order.statusHistory.map((x) => ({
+        status: String(x?.status || "").toLowerCase(),
+        changedAt: x?.changedAt || x?.at || new Date().toISOString(),
+        at: x?.changedAt || x?.at || new Date().toISOString(),
+        note: String(x?.note || "").trim(),
+      }))
+    : [];
+
   return {
     id,
     orderNumber,
     status: String(order?.status || "placed").toLowerCase(),
     payment: String(order?.payment || order?.paymentMethod || "").toLowerCase(),
+    paymentMethod: String(order?.payment || order?.paymentMethod || "").toLowerCase(),
     paymentStatus: String(order?.paymentStatus || "").toLowerCase(),
     paymentProofStatus,
+    proofStatus: paymentProofStatus,
     paymentProof: {
       imageUri: paymentProofImage,
       referenceNumber: String(order?.proofReferenceNo || order?.paymentProof?.referenceNumber || "").trim(),
@@ -164,14 +177,22 @@ function mapOrderForMobile(order) {
     items,
     subtotal: Number(order?.subtotal || 0),
     total: Number(order?.total || order?.subtotal || 0),
+    shippingFee: Number(order?.shippingFee || order?.shipping?.shippingFee || 0),
+    deliveryMethod,
     createdAt: order?.placedAt || order?.createdAt || order?.updatedAt || new Date().toISOString(),
-    statusTimeline: Array.isArray(order?.statusHistory)
-      ? order.statusHistory.map((x) => ({
-          status: String(x?.status || "").toLowerCase(),
-          at: x?.changedAt || x?.at || new Date().toISOString(),
-          note: String(x?.note || "").trim(),
-        }))
-      : [],
+    updatedAt: order?.updatedAt || order?.placedAt || order?.createdAt || new Date().toISOString(),
+    notes: String(order?.notes || order?.note || "").trim(),
+    lalamoveVehicle: order?.lalamoveVehicle || null,
+    lalamoveTrackingUrl: String(order?.lalamoveTrackingUrl || "").trim(),
+    lalamoveEta: String(order?.lalamoveEta || "").trim(),
+    shipmentPhotoUrl: String(order?.shipmentPhotoUrl || "").trim(),
+    deliveryAddress: String(order?.deliveryAddress || order?.delivery?.address || "").trim(),
+    statusHistory,
+    statusTimeline: statusHistory.map((x) => ({
+      status: x.status,
+      at: x.changedAt,
+      note: x.note,
+    })),
   };
 }
 
@@ -355,6 +376,7 @@ export async function submitOrderPaymentProof(orderKey, payload, sessionUserId) 
       ? {
           ...current,
           paymentProofStatus: "pending",
+          paymentStatus: "pending",
           paymentProof: { ...(current.paymentProof || {}), ...proofPatch },
         }
       : null;

@@ -1,9 +1,19 @@
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useEffect, useMemo, useState } from "react";
+import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useShop } from "../context/ShopContext";
 import { submitOrder } from "../services/orders";
 import { calculateShipping } from "../services/shipping";
-import { DEFAULT_LALAMOVE_VEHICLE, estimateLalamoveFeeFromAddress, LALAMOVE_VEHICLES } from "../services/lalamoveEstimate";
+import {
+  calculateBusinessTax,
+  DEFAULT_LALAMOVE_VEHICLE,
+  estimateAllLalamoveFeesFromAddress,
+  getLalamoveVehicleHint,
+  getLalamoveVehicleTag,
+  LALAMOVE_VEHICLES,
+  MOTORCYCLE_DELIVERY_WARNING,
+  pickDefaultLalamoveVehicle,
+} from "../services/lalamoveEstimate";
 import { loadCheckoutProfiles, saveCheckoutProfiles } from "../utils/storage";
 import { brand } from "../theme/brand";
 
@@ -30,7 +40,7 @@ export function CheckoutScreen({ navigation, route }) {
   const [submitting, setSubmitting] = useState(false);
   const [deliveryMethod, setDeliveryMethod] = useState("pickup");
   const [lalamoveVehicle, setLalamoveVehicle] = useState(DEFAULT_LALAMOVE_VEHICLE);
-  const [lalamoveFee, setLalamoveFee] = useState(0);
+  const [vehicleFees, setVehicleFees] = useState({});
   const [lalamoveLoading, setLalamoveLoading] = useState(false);
   const [lalamoveError, setLalamoveError] = useState("");
   const [payment, setPayment] = useState("gcash");
@@ -46,12 +56,26 @@ export function CheckoutScreen({ navigation, route }) {
     province: "",
     zip: "",
   });
+  const checkoutLineCount = checkoutItems.length;
+  const vehicleHint = useMemo(() => getLalamoveVehicleHint(checkoutLineCount), [checkoutLineCount]);
+  const deliveryAddressQuery = useMemo(
+    () => [form.address, form.city, form.province, form.zip].map((x) => String(x || "").trim()).filter(Boolean).join(", "),
+    [form.address, form.city, form.province, form.zip]
+  );
   const shipping = useMemo(
     () => calculateShipping({ province: form.province, subtotal: checkoutSubtotal }),
     [form.province, checkoutSubtotal]
   );
+  const lalamoveFee =
+    deliveryMethod === "delivery" ? Number(vehicleFees[lalamoveVehicle] || 0) : 0;
   const deliveryFee = deliveryMethod === "pickup" ? 0 : lalamoveFee;
-  const grandTotal = checkoutSubtotal + deliveryFee;
+  const businessTax = useMemo(
+    () => calculateBusinessTax(checkoutSubtotal, deliveryFee),
+    [checkoutSubtotal, deliveryFee]
+  );
+  const grandTotal = checkoutSubtotal + deliveryFee + businessTax;
+  const hasShippingEstimate = deliveryMethod !== "delivery" || lalamoveFee > 0;
+  const selectedVehicleMeta = LALAMOVE_VEHICLES.find((v) => v.id === lalamoveVehicle);
   const steps = ["Review", "Delivery", "Payment", "Confirm"];
 
   const onChange = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
@@ -62,6 +86,10 @@ export function CheckoutScreen({ navigation, route }) {
     Alert.alert("Sign in required", "Please sign in first before placing an order.");
     navigation.replace("Login");
   }, [navigation, user?.email]);
+
+  useEffect(() => {
+    setLalamoveVehicle(pickDefaultLalamoveVehicle(checkoutLineCount));
+  }, [checkoutLineCount]);
 
   useEffect(() => {
     let mounted = true;
@@ -96,7 +124,26 @@ export function CheckoutScreen({ navigation, route }) {
     return true;
   };
 
-  const validateDeliveryStep = () => true;
+  const validateDeliveryStep = () => {
+    if (deliveryMethod !== "delivery") return true;
+    if (!String(form.address || "").trim()) {
+      Alert.alert("Missing address", "Please enter your street / barangay.");
+      return false;
+    }
+    if (!String(form.city || "").trim()) {
+      Alert.alert("Missing city", "Please enter your city.");
+      return false;
+    }
+    if (!String(form.province || "").trim()) {
+      Alert.alert("Missing province", "Please enter your province.");
+      return false;
+    }
+    if (!String(form.zip || "").trim()) {
+      Alert.alert("Missing zip code", "Please enter your zip / postal code.");
+      return false;
+    }
+    return true;
+  };
 
   const validateConfirmStep = () => {
     if (!String(form.email || "").toLowerCase().endsWith("@gmail.com")) {
@@ -104,8 +151,8 @@ export function CheckoutScreen({ navigation, route }) {
       return false;
     }
     if (deliveryMethod === "delivery") {
-      if (!String(form.address || "").trim()) {
-        Alert.alert("Missing address", "Please complete your Lalamove delivery address in Step 2.");
+      if (!String(form.address || "").trim() || !String(form.city || "").trim()) {
+        Alert.alert("Missing address", "Please complete your Lalamove delivery address.");
         return false;
       }
     }
@@ -113,20 +160,23 @@ export function CheckoutScreen({ navigation, route }) {
   };
 
   useEffect(() => {
-    if (deliveryMethod !== "delivery") return;
-    const addr = String(form.address || "").trim();
-    if (!addr) return;
+    if (deliveryMethod !== "delivery") {
+      setVehicleFees({});
+      setLalamoveError("");
+      return;
+    }
+    const addr = deliveryAddressQuery;
+    if (!String(form.address || "").trim() || !String(form.city || "").trim()) {
+      setVehicleFees({});
+      return;
+    }
     const t = setTimeout(async () => {
       setLalamoveLoading(true);
       setLalamoveError("");
       try {
-        const res = await estimateLalamoveFeeFromAddress(addr, lalamoveVehicle);
-        if (res?.ok) {
-          setLalamoveFee(Number(res.fee || 0));
-        } else {
-          const flat = { motorcycle: 100, sedan: 250, suv: 300 };
-          const fee = flat[lalamoveVehicle] ?? 250;
-          setLalamoveFee(fee);
+        const res = await estimateAllLalamoveFeesFromAddress(addr);
+        setVehicleFees(res?.fees || {});
+        if (res?.usedFallback) {
           setLalamoveError("Could not locate address — using flat estimate. Final fare set by Lalamove.");
         }
       } finally {
@@ -134,7 +184,7 @@ export function CheckoutScreen({ navigation, route }) {
       }
     }, 900);
     return () => clearTimeout(t);
-  }, [deliveryMethod, form.address, lalamoveVehicle]);
+  }, [deliveryMethod, deliveryAddressQuery, form.address, form.city]);
 
   const nextStep = () => {
     if (step === 0 && !validateReviewStep()) return;
@@ -209,6 +259,7 @@ export function CheckoutScreen({ navigation, route }) {
           shippingFee: deliveryFee,
           zoneLabel: deliveryMethod === "pickup" ? "Store Pickup" : shipping.zoneLabel,
         },
+        businessTax,
         total: grandTotal,
         createdAt: new Date().toISOString(),
       });
@@ -288,9 +339,13 @@ export function CheckoutScreen({ navigation, route }) {
             <Pressable style={[styles.optionCard, deliveryMethod === "delivery" ? styles.optionCardActive : null]} onPress={() => setDeliveryMethod("delivery")}>
               <View style={styles.optionTopRow}>
                 <Text style={styles.optionTitle}>Lalamove</Text>
-                <Text style={styles.optionMeta}>{lalamoveFee > 0 ? `~${formatPrice(lalamoveFee)}` : "Estimate"}</Text>
+                <Text style={styles.optionMeta}>
+                  {deliveryMethod === "delivery" && lalamoveFee > 0
+                    ? formatPrice(lalamoveFee)
+                    : "Calculated from address"}
+                </Text>
               </View>
-              <Text style={styles.optionDesc}>Same-day city dispatch (where available)</Text>
+              <Text style={styles.optionDesc}>Same day or scheduled delivery</Text>
             </Pressable>
             {deliveryMethod === "pickup" ? (
               <View style={styles.noticeBox}>
@@ -302,33 +357,102 @@ export function CheckoutScreen({ navigation, route }) {
             {deliveryMethod === "delivery" ? (
               <>
                 <Text style={styles.label}>Delivery address</Text>
+                <Text style={styles.fieldLabel}>Street / Barangay *</Text>
                 <TextInput
-                  style={[styles.input, styles.addressInput]}
-                  placeholder="Street, Barangay, City, Province"
+                  style={styles.input}
+                  placeholder="e.g. 123 Rizal St, Brgy. San Antonio"
                   value={form.address}
                   onChangeText={(v) => onChange("address", v)}
-                  multiline
-                  textAlignVertical="top"
                 />
-                <Text style={styles.label}>Vehicle</Text>
-                <View style={styles.vehicleRow}>
-                  {LALAMOVE_VEHICLES.filter((v) => v.id !== "motorcycle").map((v) => (
-                    <Pressable
-                      key={v.id}
-                      style={[styles.vehiclePill, lalamoveVehicle === v.id ? styles.vehiclePillOn : null]}
-                      onPress={() => setLalamoveVehicle(v.id)}
-                    >
-                      <Text style={[styles.vehicleText, lalamoveVehicle === v.id ? styles.vehicleTextOn : null]}>
-                        {v.labelShort}
-                      </Text>
-                    </Pressable>
-                  ))}
+                <Text style={styles.fieldLabel}>City *</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. Quezon City"
+                  value={form.city}
+                  onChangeText={(v) => onChange("city", v)}
+                />
+                <Text style={styles.fieldLabel}>Province *</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. Metro Manila"
+                  value={form.province}
+                  onChangeText={(v) => onChange("province", v)}
+                />
+                <Text style={styles.fieldLabel}>Zip / Postal code *</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="e.g. 1100"
+                  value={form.zip}
+                  onChangeText={(v) => onChange("zip", v)}
+                  keyboardType="number-pad"
+                />
+
+                <Text style={styles.label}>Vehicle type</Text>
+                <Text style={styles.vehicleHint}>{vehicleHint}</Text>
+                <View style={styles.vehicleCardRow}>
+                  {LALAMOVE_VEHICLES.map((v) => {
+                    const selected = lalamoveVehicle === v.id;
+                    const cardFee = Number(vehicleFees[v.id] || 0);
+                    const tag = getLalamoveVehicleTag(checkoutLineCount, v.id);
+                    return (
+                      <Pressable
+                        key={v.id}
+                        style={[styles.vehicleCard, selected ? styles.vehicleCardActive : null]}
+                        onPress={() => setLalamoveVehicle(v.id)}
+                      >
+                        <View style={styles.vehicleTopRow}>
+                          <MaterialCommunityIcons
+                            name={v.iconName}
+                            size={22}
+                            color={selected ? "#0c5460" : brand.dark}
+                          />
+                          {tag ? (
+                            <View
+                              style={[
+                                styles.vehicleBadge,
+                                tag.style === "good" && styles.badgeRecommended,
+                                tag.style === "neutral" && styles.badgeAvailable,
+                                tag.style === "warn" && styles.badgeWarn,
+                              ]}
+                            >
+                              <Text
+                                style={[
+                                  styles.vehicleBadgeText,
+                                  tag.style === "good" && styles.vehicleBadgeTextGood,
+                                  tag.style === "warn" && styles.vehicleBadgeTextWarn,
+                                ]}
+                              >
+                                {tag.label.toUpperCase()}
+                              </Text>
+                            </View>
+                          ) : null}
+                        </View>
+                        <Text style={[styles.vehicleCardTitle, selected ? styles.vehicleCardTitleActive : null]}>
+                          {v.label}
+                        </Text>
+                        <Text style={styles.vehicleCardSub}>{v.subtitle}</Text>
+                        {cardFee > 0 && selected ? (
+                          <Text style={[styles.vehicleCardPrice, styles.vehicleCardPriceActive]}>
+                            ~{formatPrice(cardFee)}
+                          </Text>
+                        ) : null}
+                      </Pressable>
+                    );
+                  })}
                 </View>
+
+                {lalamoveVehicle === "motorcycle" ? (
+                  <View style={styles.motorcycleAlert}>
+                    <Text style={styles.motorcycleAlertText}>⚠ {MOTORCYCLE_DELIVERY_WARNING}</Text>
+                  </View>
+                ) : null}
+
                 {lalamoveLoading ? <Text style={styles.deliveryHint}>Computing shipping estimate…</Text> : null}
                 {!lalamoveLoading && lalamoveFee > 0 ? (
                   <Text style={styles.deliveryHint}>
-                    {LALAMOVE_VEHICLES.find((v) => v.id === lalamoveVehicle)?.labelShort || "Sedan"} estimate:{" "}
+                    {selectedVehicleMeta?.labelShort || "Sedan"} estimate:{" "}
                     <Text style={styles.deliveryStrong}>{formatPrice(lalamoveFee)}</Text>
+                    {"  "}Dynamic pricing — final fare set by Lalamove at booking.
                   </Text>
                 ) : null}
                 {lalamoveError ? <Text style={styles.deliveryWarn}>{lalamoveError}</Text> : null}
@@ -402,7 +526,19 @@ export function CheckoutScreen({ navigation, route }) {
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Delivery</Text>
-              <Text style={styles.summaryValue}>{deliveryMethod === "pickup" ? "Store pickup" : `${formatPrice(deliveryFee)} (${shipping.zoneLabel})`}</Text>
+              <Text style={styles.summaryValue}>
+                {deliveryMethod === "pickup"
+                  ? "Store pickup"
+                  : hasShippingEstimate
+                    ? formatPrice(deliveryFee)
+                    : "TBD"}
+              </Text>
+            </View>
+            <View style={styles.summaryRow}>
+              <Text style={styles.summaryLabel}>Business tax (3%)</Text>
+              <Text style={styles.summaryValue}>
+                {deliveryMethod === "delivery" && !hasShippingEstimate ? "TBD" : formatPrice(businessTax)}
+              </Text>
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryLabel}>Estimated arrival</Text>
@@ -448,13 +584,30 @@ export function CheckoutScreen({ navigation, route }) {
           <Text style={styles.summaryValue}>{formatPrice(checkoutSubtotal)}</Text>
         </View>
         <View style={styles.summaryRow}>
-          <Text style={styles.summaryLabel}>Delivery fee</Text>
-          <Text style={styles.summaryValue}>{formatPrice(deliveryFee)}</Text>
+          <Text style={styles.summaryLabel}>Shipping</Text>
+          <Text style={styles.summaryValue}>
+            {deliveryMethod === "pickup"
+              ? formatPrice(0)
+              : hasShippingEstimate
+                ? formatPrice(deliveryFee)
+                : "TBD"}
+          </Text>
+        </View>
+        <View style={styles.summaryRow}>
+          <Text style={styles.summaryLabel}>Business tax (3%)</Text>
+          <Text style={styles.summaryValue}>
+            {deliveryMethod === "delivery" && !hasShippingEstimate ? "TBD" : formatPrice(businessTax)}
+          </Text>
         </View>
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Total</Text>
-          <Text style={styles.summaryTotal}>{formatPrice(grandTotal)}</Text>
+          <Text style={styles.summaryTotal}>
+            {deliveryMethod === "delivery" && !hasShippingEstimate ? "TBD" : formatPrice(grandTotal)}
+          </Text>
         </View>
+        {deliveryMethod === "delivery" && !hasShippingEstimate ? (
+          <Text style={styles.summaryNote}>* Enter your address to calculate shipping and total</Text>
+        ) : null}
       </View>
 
       <View style={styles.actions}>
@@ -590,16 +743,63 @@ const styles = StyleSheet.create({
   noticeText: { color: brand.text, fontSize: 12, lineHeight: 18 },
   noticeStrong: { fontWeight: "700", color: brand.dark },
   label: { color: brand.dark, fontWeight: "700", marginTop: 8, marginBottom: 3, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.8 },
-  vehicleRow: { flexDirection: "row", gap: 8, flexWrap: "wrap", marginBottom: 2 },
-  vehiclePill: { borderWidth: 1, borderColor: brand.border, backgroundColor: brand.white, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 12 },
-  vehiclePillOn: { borderColor: "#0c5460", backgroundColor: "#f0f7ff" },
-  vehicleText: { color: brand.dark, fontWeight: "800", fontSize: 12 },
-  vehicleTextOn: { color: "#0c5460" },
+  fieldLabel: { color: brand.textLight, fontWeight: "700", marginTop: 4, marginBottom: 3, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.6 },
+  vehicleHint: { color: brand.textLight, fontSize: 12, lineHeight: 18, marginBottom: 8 },
+  vehicleCardRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    paddingBottom: 4,
+  },
+  vehicleCard: {
+    flexGrow: 1,
+    flexBasis: "30%",
+    minWidth: 108,
+    borderWidth: 1,
+    borderColor: brand.border,
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: brand.white,
+    minHeight: 128,
+  },
+  vehicleCardActive: { borderColor: "#7a5a44", backgroundColor: "rgba(122,90,68,0.06)" },
+  vehicleTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    width: "100%",
+    marginBottom: 6,
+  },
+  vehicleBadge: {
+    borderRadius: 3,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    maxWidth: "72%",
+  },
+  badgeAvailable: { backgroundColor: "#e8f0ff" },
+  badgeRecommended: { backgroundColor: "#d4edda" },
+  badgeWarn: { backgroundColor: "#fff3cd" },
+  vehicleBadgeText: { fontSize: 8, fontWeight: "800", letterSpacing: 0.3, color: "#2d5be3" },
+  vehicleBadgeTextGood: { color: "#155724" },
+  vehicleBadgeTextWarn: { color: "#856404" },
+  vehicleCardTitle: { color: brand.dark, fontWeight: "700", fontSize: 11, lineHeight: 15 },
+  vehicleCardTitleActive: { color: "#2c2420" },
+  vehicleCardSub: { color: brand.textLight, fontSize: 10, lineHeight: 14, marginTop: 4 },
+  vehicleCardPrice: { color: "#2c6e3f", fontWeight: "700", fontSize: 11, marginTop: 8 },
+  vehicleCardPriceActive: { color: "#2c6e3f" },
+  motorcycleAlert: {
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: "#ffecb5",
+    backgroundColor: "#fff8e6",
+    borderRadius: 8,
+    padding: 10,
+  },
+  motorcycleAlertText: { color: "#856404", fontSize: 12, lineHeight: 18 },
   deliveryStrong: { fontWeight: "900", color: "#0c5460" },
   deliveryWarn: { color: "#856404", marginTop: 6, fontSize: 12 },
   input: { borderWidth: 1, borderColor: brand.border, padding: 11, marginBottom: 8, backgroundColor: brand.white, borderRadius: 8 },
-  addressInput: { minHeight: 72 },
-  deliveryHint: { color: brand.textLight, fontSize: 11, marginTop: -2, marginBottom: 4 },
+  deliveryHint: { color: brand.textLight, fontSize: 11, marginTop: 6, marginBottom: 4 },
   summaryCard: { backgroundColor: brand.white, borderWidth: 1, borderColor: brand.border, borderRadius: 12, padding: 14, gap: 8 },
   summaryTitle: { color: brand.dark, fontWeight: "800", letterSpacing: 0.4, marginBottom: 2 },
   summaryRow: { flexDirection: "row", justifyContent: "space-between", gap: 10 },
@@ -612,6 +812,7 @@ const styles = StyleSheet.create({
   summaryLabel: { color: brand.textLight },
   summaryValue: { color: brand.dark, fontWeight: "600", textAlign: "right", flexShrink: 1 },
   summaryTotal: { color: brand.dark, fontWeight: "800", fontSize: 16 },
+  summaryNote: { color: brand.textLight, fontSize: 10, marginTop: 4, fontStyle: "italic" },
   summaryName: { color: brand.dark, flex: 1, marginRight: 8 },
   summaryPrice: { color: brand.dark, fontWeight: "600" },
   listItem: { color: brand.text, marginBottom: 5, fontSize: 13 },

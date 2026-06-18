@@ -6,6 +6,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useShop } from "../context/ShopContext";
 import { brand } from "../theme/brand";
 import { normalizeId } from "../utils/id";
+import { handleToggleFavorite } from "../utils/favoritePress";
 
 export function HomeScreen({ navigation }) {
   const insets = useSafeAreaInsets();
@@ -258,7 +259,7 @@ export function HomeScreen({ navigation }) {
                   {g.promo && g.promoPrice ? `${g.promoPrice} • Promo` : g.price} • {g.silhouette}
                 </Text>
               </Pressable>
-              <Pressable style={styles.favBtn} onPress={() => toggleFavorite(g.id)}>
+              <Pressable style={styles.favBtn} onPress={() => handleToggleFavorite(toggleFavorite, g.id, navigation)}>
                 <Ionicons
                   name={favoritesSet?.has(normalizeId(g.id)) ? "heart" : "heart-outline"}
                   size={18}
@@ -286,7 +287,7 @@ export function HomeScreen({ navigation }) {
                   {g.color} • {g.type}
                 </Text>
               </Pressable>
-              <Pressable style={styles.favBtn} onPress={() => toggleFavorite(g.id)}>
+              <Pressable style={styles.favBtn} onPress={() => handleToggleFavorite(toggleFavorite, g.id, navigation)}>
                 <Ionicons
                   name={favoritesSet?.has(normalizeId(g.id)) ? "heart" : "heart-outline"}
                   size={18}
@@ -314,7 +315,7 @@ export function HomeScreen({ navigation }) {
                   {g.promo && g.promoPrice ? `${g.promoPrice} • Promo` : g.price}
                 </Text>
               </Pressable>
-              <Pressable style={styles.favBtn} onPress={() => toggleFavorite(g.id)}>
+              <Pressable style={styles.favBtn} onPress={() => handleToggleFavorite(toggleFavorite, g.id, navigation)}>
                 <Ionicons
                   name={favoritesSet?.has(normalizeId(g.id)) ? "heart" : "heart-outline"}
                   size={18}

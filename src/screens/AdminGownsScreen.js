@@ -2,7 +2,7 @@ import { useCallback, useMemo, useState } from "react";
 import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from "react-native";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import * as ImagePicker from "expo-image-picker";
-import { deleteGownAdmin, getAllGownsAdmin, setGownArchivedAdmin, upsertGownAdmin } from "../services/gowns";
+import { deleteGownAdmin, getAllGownsAdmin, setGownArchivedAdmin, uploadAdminTryonImage, upsertGownAdmin } from "../services/gowns";
 import { useShop } from "../context/ShopContext";
 import { canAccess } from "../utils/access";
 import { brand } from "../theme/brand";
@@ -22,12 +22,40 @@ const EMPTY_FORM = {
   alt: "",
   description: "",
   additionalImage1: "",
+  tryonImage: "",
+  tryonImageBack: "",
+  tryonCalibration: null,
   sizeInventory: {},
   stockQty: "0",
   lowStockThreshold: "0",
 };
 
 const SIZE_PRESETS = ["XS", "S", "M", "L", "XL", "2XL", "3XL", "4XL", "6", "8", "10", "12", "14", "16"];
+
+function gownToForm(g) {
+  return {
+    id: String(g?.id || ""),
+    name: g?.name || "",
+    price: g?.price || "",
+    promoPrice: g?.promoPrice || "",
+    promo: Boolean(g?.promo),
+    image: g?.image || "",
+    type: g?.type || "Gowns",
+    color: g?.color || "",
+    silhouette: g?.silhouette || "",
+    fabric: g?.fabric || "",
+    neckline: g?.neckline || "",
+    alt: g?.alt || "",
+    description: g?.description || "",
+    additionalImage1: Array.isArray(g?.additionalImages) ? String(g.additionalImages[0] || "") : "",
+    tryonImage: g?.tryonImage || "",
+    tryonImageBack: g?.tryonImageBack || "",
+    tryonCalibration: g?.tryonCalibration || null,
+    sizeInventory: g?.sizeInventory && typeof g.sizeInventory === "object" ? g.sizeInventory : {},
+    stockQty: String(Number(g?.stockQty) || 0),
+    lowStockThreshold: String(Number(g?.lowStockThreshold) || 0),
+  };
+}
 
 export function AdminGownsScreen() {
   const { user } = useShop();
@@ -47,6 +75,8 @@ export function AdminGownsScreen() {
   const [stockCustomSize, setStockCustomSize] = useState("");
   const [viewOpen, setViewOpen] = useState(false);
   const [viewTarget, setViewTarget] = useState(null);
+  const [uploadingField, setUploadingField] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const buildPayloadFromForm = () => {
     const parsedSizeInventory =
@@ -57,6 +87,9 @@ export function AdminGownsScreen() {
         : {};
     return {
       ...form,
+      tryonImage: String(form.tryonImage || "").trim(),
+      tryonImageBack: String(form.tryonImageBack || "").trim(),
+      tryonCalibration: form.tryonCalibration || null,
       additionalImages: [form.additionalImage1]
         .map((x) => String(x || "").trim())
         .filter(Boolean),
@@ -64,7 +97,7 @@ export function AdminGownsScreen() {
     };
   };
 
-  const pickImageFromGallery = useCallback(async () => {
+  const pickAndUploadImage = useCallback(async (fieldName) => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
       Alert.alert("Permission needed", "Please allow photo library access to pick an image.");
@@ -72,63 +105,67 @@ export function AdminGownsScreen() {
     }
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      quality: 0.85,
+      allowsEditing: false,
+      quality: 0.92,
     });
     if (result.canceled) return;
     const uri = result.assets?.[0]?.uri;
     if (!uri) return;
-    setForm((p) => ({ ...p, image: uri }));
+    setUploadingField(fieldName);
+    try {
+      const uploaded = await uploadAdminTryonImage(uri);
+      if (!uploaded.ok) throw new Error(uploaded.error || "Upload failed.");
+      setForm((p) => ({ ...p, [fieldName]: uploaded.url }));
+    } catch (e) {
+      Alert.alert("Upload failed", e?.message || "Could not upload image.");
+    } finally {
+      setUploadingField("");
+    }
   }, []);
 
-  const pickImageForField = useCallback(async (fieldName) => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  const pickImageFromGallery = useCallback(async () => {
+    await pickAndUploadImage("image");
+  }, [pickAndUploadImage]);
+
+  const pickImageForField = useCallback(
+    async (fieldName) => {
+      await pickAndUploadImage(fieldName);
+    },
+    [pickAndUploadImage]
+  );
+
+  const takePhotoAndUpload = useCallback(async (fieldName) => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
     if (!perm.granted) {
-      Alert.alert("Permission needed", "Please allow photo library access to pick an image.");
+      Alert.alert("Permission needed", "Please allow camera access to take a photo.");
       return;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      quality: 0.85,
-    });
+    const result = await ImagePicker.launchCameraAsync({ allowsEditing: false, quality: 0.92 });
     if (result.canceled) return;
     const uri = result.assets?.[0]?.uri;
     if (!uri) return;
-    setForm((p) => ({ ...p, [fieldName]: uri }));
+    setUploadingField(fieldName);
+    try {
+      const uploaded = await uploadAdminTryonImage(uri);
+      if (!uploaded.ok) throw new Error(uploaded.error || "Upload failed.");
+      setForm((p) => ({ ...p, [fieldName]: uploaded.url }));
+    } catch (e) {
+      Alert.alert("Upload failed", e?.message || "Could not upload image.");
+    } finally {
+      setUploadingField("");
+    }
   }, []);
 
   const takePhotoForImage = useCallback(async () => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert("Permission needed", "Please allow camera access to take a photo.");
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      allowsEditing: true,
-      quality: 0.85,
-    });
-    if (result.canceled) return;
-    const uri = result.assets?.[0]?.uri;
-    if (!uri) return;
-    setForm((p) => ({ ...p, image: uri }));
-  }, []);
+    await takePhotoAndUpload("image");
+  }, [takePhotoAndUpload]);
 
-  const takePhotoForField = useCallback(async (fieldName) => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert("Permission needed", "Please allow camera access to take a photo.");
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      allowsEditing: true,
-      quality: 0.85,
-    });
-    if (result.canceled) return;
-    const uri = result.assets?.[0]?.uri;
-    if (!uri) return;
-    setForm((p) => ({ ...p, [fieldName]: uri }));
-  }, []);
+  const takePhotoForField = useCallback(
+    async (fieldName) => {
+      await takePhotoAndUpload(fieldName);
+    },
+    [takePhotoAndUpload]
+  );
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -148,6 +185,10 @@ export function AdminGownsScreen() {
       Alert.alert("Missing name", "Please enter a gown name.");
       return;
     }
+    if (!String(form.image || "").trim()) {
+      Alert.alert("Missing image", "Please add a display image.");
+      return;
+    }
     let payload;
     try {
       payload = buildPayloadFromForm();
@@ -155,15 +196,20 @@ export function AdminGownsScreen() {
       Alert.alert("Invalid size inventory", e.message || "Please check your size inventory format.");
       return;
     }
-    const result = await upsertGownAdmin(payload);
-    if (!result.ok) {
-      Alert.alert("Save failed", "Could not save gown.");
-      return;
+    setSaving(true);
+    try {
+      const result = await upsertGownAdmin(payload);
+      if (!result.ok) {
+        Alert.alert("Save failed", result.error || "Could not save gown.");
+        return;
+      }
+      setForm(EMPTY_FORM);
+      setCustomSize("");
+      setEditorOpen(false);
+      loadData();
+    } finally {
+      setSaving(false);
     }
-    setForm(EMPTY_FORM);
-    setCustomSize("");
-    setEditorOpen(false);
-    loadData();
   };
 
   const stats = useMemo(() => {
@@ -310,6 +356,8 @@ export function AdminGownsScreen() {
               <Text style={styles.itemMeta}>
                 #{g.id} • {g.type} • {g.promo && g.promoPrice ? `${g.price} → ${g.promoPrice}` : g.price}
               </Text>
+              {g.tryonImage ? <Text style={styles.vtoBadge}>VTO</Text> : null}
+              {g.tryonImageBack ? <Text style={styles.vtoBadgeBack}>↩ Back</Text> : null}
               <Text style={Number(g.stockQty) <= 0 ? styles.stockOut : Number(g.stockQty) <= Number(g.lowStockThreshold || 0) ? styles.stockLow : styles.stockOk}>
                 Stock: {Number(g.stockQty) || 0}
                 {Number(g.stockQty) <= 0 ? " (out)" : Number(g.stockQty) <= Number(g.lowStockThreshold || 0) ? " (low)" : ""}
@@ -360,25 +408,7 @@ export function AdminGownsScreen() {
             ) : (
               <>
                 <Pressable style={styles.secondaryBtn} onPress={() => {
-                  setForm({
-                    id: String(g.id),
-                    name: g.name || "",
-                    price: g.price || "",
-                    promoPrice: g.promoPrice || "",
-                    promo: Boolean(g.promo),
-                    image: g.image || "",
-                    type: g.type || "Gowns",
-                    color: g.color || "",
-                    silhouette: g.silhouette || "",
-                    fabric: g.fabric || "",
-                    neckline: g.neckline || "",
-                    alt: g.alt || "",
-                    description: g.description || "",
-                    additionalImage1: Array.isArray(g.additionalImages) ? String(g.additionalImages[0] || "") : "",
-                    sizeInventory: g.sizeInventory && typeof g.sizeInventory === "object" ? g.sizeInventory : {},
-                    stockQty: String(Number(g.stockQty) || 0),
-                    lowStockThreshold: String(Number(g.lowStockThreshold) || 0),
-                  });
+                  setForm(gownToForm(g));
                   setCustomSize("");
                   setEditorOpen(true);
                 }}>
@@ -445,25 +475,7 @@ export function AdminGownsScreen() {
                 onPress={() => {
                   setViewOpen(false);
                   if (!viewTarget) return;
-                  setForm({
-                    id: String(viewTarget.id),
-                    name: viewTarget.name || "",
-                    price: viewTarget.price || "",
-                    promoPrice: viewTarget.promoPrice || "",
-                    promo: Boolean(viewTarget.promo),
-                    image: viewTarget.image || "",
-                    type: viewTarget.type || "Gowns",
-                    color: viewTarget.color || "",
-                    silhouette: viewTarget.silhouette || "",
-                    fabric: viewTarget.fabric || "",
-                    neckline: viewTarget.neckline || "",
-                    alt: viewTarget.alt || "",
-                    description: viewTarget.description || "",
-                    additionalImage1: Array.isArray(viewTarget.additionalImages) ? String(viewTarget.additionalImages[0] || "") : "",
-                    sizeInventory: viewTarget.sizeInventory && typeof viewTarget.sizeInventory === "object" ? viewTarget.sizeInventory : {},
-                    stockQty: String(Number(viewTarget.stockQty) || 0),
-                    lowStockThreshold: String(Number(viewTarget.lowStockThreshold) || 0),
-                  });
+                  setForm(gownToForm(viewTarget));
                   setEditorOpen(true);
                 }}
               >
@@ -501,6 +513,26 @@ export function AdminGownsScreen() {
                 <Text style={styles.viewMetaLine}>No size inventory set.</Text>
               )}
             </View>
+
+            {viewTarget?.tryonImage || viewTarget?.tryonImageBack ? (
+              <>
+                <Text style={styles.viewSectionLabel}>Try-on images</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.viewThumbRow}>
+                  {viewTarget?.tryonImage ? (
+                    <View style={styles.viewTryonWrap}>
+                      <Image source={{ uri: String(viewTarget.tryonImage) }} style={styles.viewThumb} />
+                      <Text style={styles.viewTryonLabel}>Front</Text>
+                    </View>
+                  ) : null}
+                  {viewTarget?.tryonImageBack ? (
+                    <View style={styles.viewTryonWrap}>
+                      <Image source={{ uri: String(viewTarget.tryonImageBack) }} style={styles.viewThumb} />
+                      <Text style={styles.viewTryonLabel}>Back</Text>
+                    </View>
+                  ) : null}
+                </ScrollView>
+              </>
+            ) : null}
 
             {Array.isArray(viewTarget?.additionalImages) && viewTarget.additionalImages.length ? (
               <>
@@ -725,50 +757,84 @@ export function AdminGownsScreen() {
 
               <TextInput style={[styles.input, styles.inputArea]} placeholder="Description" value={form.description} onChangeText={(v) => setForm((p) => ({ ...p, description: v }))} multiline />
 
-              <Text style={styles.sectionLabel}>Media</Text>
-              <TextInput style={styles.input} placeholder="Image URL" value={form.image} onChangeText={(v) => setForm((p) => ({ ...p, image: v }))} autoCapitalize="none" />
-              <TextInput style={styles.input} placeholder="Additional image 1 URL" value={form.additionalImage1} onChangeText={(v) => setForm((p) => ({ ...p, additionalImage1: v }))} autoCapitalize="none" />
-              <View style={styles.imagePickerRow}>
-                <Pressable style={styles.secondaryBtn} onPress={pickImageFromGallery}>
-                  <Text style={styles.secondaryBtnText}>Pick from Gallery</Text>
-                </Pressable>
-                <Pressable style={styles.secondaryBtn} onPress={takePhotoForImage}>
-                  <Text style={styles.secondaryBtnText}>Take Photo</Text>
-                </Pressable>
-              </View>
-              <View style={styles.additionalActionsBlock}>
-                {[{ key: "additionalImage1", label: "Additional Image" }].map((slot) => (
-                  <View key={slot.key} style={styles.additionalRow}>
-                    <Text style={styles.additionalRowLabel}>{slot.label}</Text>
+              <Text style={styles.sectionLabel}>Images</Text>
+
+              {[
+                {
+                  field: "image",
+                  label: "Display image",
+                  hint: "Shown in catalog & product pages. Not used for try-on.",
+                  badge: null,
+                },
+                {
+                  field: "tryonImage",
+                  label: "Try-on — front",
+                  hint: "Transparent PNG, front view. Upload separately from display image.",
+                  badge: "FRONT",
+                  badgeStyle: styles.tryonBadgeGold,
+                },
+                {
+                  field: "tryonImageBack",
+                  label: "Try-on — back",
+                  hint: "Back view. Transparent PNG.",
+                  badge: "BACK",
+                  badgeStyle: styles.tryonBadgeBlue,
+                },
+              ].map((slot) => {
+                const value = String(form[slot.field] || "").trim();
+                const busy = uploadingField === slot.field;
+                return (
+                  <View key={slot.field} style={styles.tryonSlot}>
+                    <View style={styles.tryonSlotHead}>
+                      <Text style={styles.tryonSlotLabel}>{slot.label}</Text>
+                      {slot.badge ? (
+                        <View style={[styles.tryonBadge, slot.badgeStyle]}>
+                          <Text style={styles.tryonBadgeText}>{slot.badge}</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Text style={styles.tryonSlotHint}>{slot.hint}</Text>
+                    <TextInput
+                      style={styles.input}
+                      placeholder="/images/filename.png or https://..."
+                      value={value}
+                      onChangeText={(v) => setForm((p) => ({ ...p, [slot.field]: v }))}
+                      autoCapitalize="none"
+                    />
                     <View style={styles.additionalRowActions}>
-                      <Pressable style={styles.secondaryBtn} onPress={() => pickImageForField(slot.key)}>
-                        <Text style={styles.secondaryBtnText}>Upload</Text>
+                      <Pressable
+                        style={styles.secondaryBtn}
+                        disabled={busy}
+                        onPress={() => pickImageForField(slot.field)}
+                      >
+                        <Text style={styles.secondaryBtnText}>{busy ? "Uploading…" : "Upload"}</Text>
                       </Pressable>
-                      <Pressable style={styles.secondaryBtn} onPress={() => takePhotoForField(slot.key)}>
+                      <Pressable
+                        style={styles.secondaryBtn}
+                        disabled={busy}
+                        onPress={() => takePhotoForField(slot.field)}
+                      >
                         <Text style={styles.secondaryBtnText}>Camera</Text>
                       </Pressable>
                       <Pressable
                         style={styles.clearMiniBtn}
-                        onPress={() => setForm((p) => ({ ...p, [slot.key]: "" }))}
+                        onPress={() => setForm((p) => ({ ...p, [slot.field]: "" }))}
                       >
                         <Text style={styles.clearMiniBtnText}>Clear</Text>
                       </Pressable>
                     </View>
+                    {value ? (
+                      <View style={styles.previewWrap}>
+                        <Image source={{ uri: value }} style={styles.tryonPreviewImage} resizeMode="contain" />
+                      </View>
+                    ) : (
+                      <View style={styles.tryonEmptyBox}>
+                        <Text style={styles.tryonEmptyText}>Drop or tap Upload</Text>
+                      </View>
+                    )}
                   </View>
-                ))}
-              </View>
-              {String(form.image || "").trim() ? (
-                <View style={styles.previewWrap}>
-                  <Image source={{ uri: String(form.image).trim() }} style={styles.previewImage} />
-                </View>
-              ) : null}
-              <View style={styles.extraPreviewRow}>
-                {["additionalImage1"].map((field) =>
-                  String(form[field] || "").trim() ? (
-                    <Image key={`preview-${field}`} source={{ uri: String(form[field]).trim() }} style={styles.extraPreviewThumb} />
-                  ) : null
-                )}
-              </View>
+                );
+              })}
 
               <Text style={styles.sectionLabel}>Inventory</Text>
         <View style={styles.row}>
@@ -881,8 +947,8 @@ export function AdminGownsScreen() {
                 <Pressable style={styles.modalCancelBtn} onPress={() => setEditorOpen(false)}>
                   <Text style={styles.modalCancelText}>Cancel</Text>
             </Pressable>
-                <Pressable style={styles.modalSaveBtn} onPress={onSave}>
-                  <Text style={styles.modalSaveText}>Update Gown</Text>
+                <Pressable style={styles.modalSaveBtn} onPress={onSave} disabled={saving || Boolean(uploadingField)}>
+                  <Text style={styles.modalSaveText}>{saving ? "Saving…" : "Update Gown"}</Text>
             </Pressable>
               </View>
             </ScrollView>
@@ -947,6 +1013,34 @@ const styles = StyleSheet.create({
   clearMiniBtnText: { color: brand.textLight, fontWeight: "700", fontSize: 11 },
   previewWrap: { borderWidth: 1, borderColor: brand.border, borderRadius: 10, overflow: "hidden", backgroundColor: brand.white, marginBottom: 8 },
   previewImage: { width: "100%", height: 180, backgroundColor: "#eee" },
+  tryonPreviewImage: { width: "100%", height: 140, backgroundColor: "#f5f5f5" },
+  tryonSlot: {
+    borderWidth: 1,
+    borderColor: brand.border,
+    borderRadius: 10,
+    padding: 10,
+    backgroundColor: brand.white,
+    marginBottom: 10,
+  },
+  tryonSlotHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4 },
+  tryonSlotLabel: { color: brand.dark, fontWeight: "800", fontSize: 12 },
+  tryonSlotHint: { color: brand.textLight, fontSize: 11, lineHeight: 16, marginBottom: 8 },
+  tryonBadge: { borderRadius: 3, paddingHorizontal: 6, paddingVertical: 2 },
+  tryonBadgeGold: { backgroundColor: "rgba(200,169,110,0.2)" },
+  tryonBadgeBlue: { backgroundColor: "rgba(74,127,212,0.15)" },
+  tryonBadgeText: { fontSize: 9, fontWeight: "800", letterSpacing: 0.5, color: brand.dark },
+  tryonEmptyBox: {
+    borderWidth: 1.5,
+    borderStyle: "dashed",
+    borderColor: brand.border,
+    borderRadius: 8,
+    minHeight: 72,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#fafafa",
+    marginTop: 8,
+  },
+  tryonEmptyText: { color: brand.textLight, fontSize: 11 },
   extraPreviewRow: { flexDirection: "row", gap: 8, marginBottom: 8 },
   extraPreviewThumb: { width: 64, height: 78, borderRadius: 8, borderWidth: 1, borderColor: brand.border, backgroundColor: "#eee" },
   clearImageBtn: { paddingVertical: 10, paddingHorizontal: 12, borderTopWidth: 1, borderTopColor: brand.border, backgroundColor: brand.white },
@@ -959,6 +1053,30 @@ const styles = StyleSheet.create({
   itemHeaderText: { flex: 1, minWidth: 0 },
   itemTitle: { color: brand.dark, fontWeight: "800", fontSize: 14 },
   itemMeta: { color: brand.textLight, marginTop: 2, fontSize: 12 },
+  vtoBadge: {
+    alignSelf: "flex-start",
+    marginTop: 4,
+    fontSize: 9,
+    fontWeight: "800",
+    color: "#155724",
+    backgroundColor: "#d4edda",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 3,
+    overflow: "hidden",
+  },
+  vtoBadgeBack: {
+    alignSelf: "flex-start",
+    marginTop: 4,
+    fontSize: 9,
+    fontWeight: "800",
+    color: "#0a5276",
+    backgroundColor: "#e8f4fd",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 3,
+    overflow: "hidden",
+  },
   stockOk: { marginTop: 4, fontSize: 12, fontWeight: "800", color: brand.text },
   stockLow: { marginTop: 4, fontSize: 12, fontWeight: "900", color: "#a36a00" },
   stockOut: { marginTop: 4, fontSize: 12, fontWeight: "900", color: "#b00020" },
@@ -1125,6 +1243,8 @@ const styles = StyleSheet.create({
   viewSizeQty: { color: "#8a5a16", fontWeight: "800", fontSize: 11 },
   viewThumbRow: { gap: 8 },
   viewThumb: { width: 44, height: 56, borderRadius: 8, borderWidth: 1, borderColor: brand.border, backgroundColor: "#efefef" },
+  viewTryonWrap: { alignItems: "center", gap: 4 },
+  viewTryonLabel: { fontSize: 9, color: brand.textLight, fontWeight: "700", textTransform: "uppercase" },
   viewDescription: { color: brand.text, fontSize: 11, lineHeight: 16 },
   viewActions: { flexDirection: "row", justifyContent: "flex-start", gap: 8, marginTop: 8 },
   viewQuickBtn: { borderWidth: 1, borderColor: brand.border, backgroundColor: "#edf3ff", borderRadius: 6, paddingVertical: 7, paddingHorizontal: 10 },

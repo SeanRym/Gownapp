@@ -14,6 +14,12 @@ import {
   saveCartToServer,
 } from "../services/cart";
 import { trackInteraction, syncInteractionsToServer } from "../services/recommendations";
+import {
+  addFavorite,
+  fetchFavoriteIds,
+  removeFavorite,
+  syncFavoritesWithServer,
+} from "../services/favorites";
 
 const ShopContext = createContext(null);
 
@@ -23,7 +29,39 @@ export function ShopProvider({ children }) {
   const [cart, setCart] = useState([]);
   const [user, setUser] = useState(null);
   const [favoritesIds, setFavoritesIds] = useState([]);
+  const [favoritesLoading, setFavoritesLoading] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState("");
+
+  const applyFavorites = useCallback(async (ids) => {
+    const next = (Array.isArray(ids) ? ids : []).map((x) => normalizeId(x)).filter(Boolean);
+    setFavoritesIds(next);
+    await saveFavorites(next);
+    return next;
+  }, []);
+
+  const reloadFavorites = useCallback(async (userId = user?.id, localIds = favoritesIds) => {
+    if (!userId) {
+      await applyFavorites([]);
+      return [];
+    }
+    setFavoritesLoading(true);
+    try {
+      const synced = await syncFavoritesWithServer(userId, localIds);
+      await applyFavorites(synced);
+      return synced;
+    } catch (err) {
+      console.warn("Failed to load favorites from server:", err);
+      try {
+        const serverIds = await fetchFavoriteIds(userId);
+        await applyFavorites(serverIds);
+        return serverIds;
+      } catch {
+        return localIds;
+      }
+    } finally {
+      setFavoritesLoading(false);
+    }
+  }, [applyFavorites, favoritesIds, user?.id]);
 
   const reloadGowns = useCallback(async () => {
     const data = await fetchGowns();
@@ -35,11 +73,11 @@ export function ShopProvider({ children }) {
     let mounted = true;
     (async () => {
       try {
-        const [gownsData, guestCartData, userData, favoritesData] = await Promise.all([
+        const [gownsData, userData, localFavoritesData, guestCartData] = await Promise.all([
           fetchGowns(),
           loadUser(),
           loadFavorites(),
-          loadCart(), // guest cart
+          loadCart(),
         ]);
         const lastSync = await getLastSyncAt();
         if (!mounted) return;
@@ -97,7 +135,15 @@ export function ShopProvider({ children }) {
         
         setCart(cartToUse);
         setUser(userData);
-        setFavoritesIds(favoritesData.map((x) => normalizeId(x)).filter(Boolean));
+
+        const localFavIds = localFavoritesData.map((x) => normalizeId(x)).filter(Boolean);
+        if (userData?.id) {
+          const synced = await syncFavoritesWithServer(userData.id, localFavIds);
+          await applyFavorites(synced);
+        } else {
+          await applyFavorites([]);
+        }
+
         setLastSyncedAt(lastSync);
       } finally {
         if (mounted) setLoading(false);
@@ -376,6 +422,14 @@ export function ShopProvider({ children }) {
       } catch (err) {
         console.warn("Failed to fetch cart from server on login:", err);
       }
+
+      try {
+        const localFavIds = (await loadFavorites()).map((x) => normalizeId(x)).filter(Boolean);
+        const synced = await syncFavoritesWithServer(nextUser.id, localFavIds);
+        await applyFavorites(synced);
+      } catch (err) {
+        console.warn("Failed to sync favorites on login:", err);
+      }
     }
   };
 
@@ -394,8 +448,10 @@ export function ShopProvider({ children }) {
     }
     setUser(null);
     setCart([]);
+    setFavoritesIds([]);
     await clearUser();
     await saveCart([]);
+    await saveFavorites([]);
   };
 
   const syncNow = async () => {
@@ -447,21 +503,35 @@ export function ShopProvider({ children }) {
 
   const toggleFavorite = async (id) => {
     const normalizedId = normalizeId(id);
-    const next = favoritesIds.map(normalizeId).includes(normalizedId)
+    if (!normalizedId) return { ok: false };
+
+    if (!user?.id) {
+      return { ok: false, needsAuth: true };
+    }
+
+    const wasFav = favoritesIds.map(normalizeId).includes(normalizedId);
+    const next = wasFav
       ? favoritesIds.map(normalizeId).filter((x) => x !== normalizedId)
       : [...favoritesIds.map(normalizeId), normalizedId];
+
     setFavoritesIds(next);
     await saveFavorites(next);
-    // Sync to backend and track interaction
-    if (user?.email) {
-      await syncUserData({
-        user,
-        cart,
-        favoritesIds: next,
-        syncedAt: new Date().toISOString(),
-      }).catch(() => {});
-      // Track as favorite interaction
-      await trackInteraction(user.email, id, "favorite");
+
+    try {
+      if (wasFav) {
+        await removeFavorite(user.id, normalizedId);
+      } else {
+        await addFavorite(user.id, normalizedId);
+        await trackInteraction(user.email, normalizedId, "favorite");
+      }
+      return { ok: true, isFavorited: !wasFav };
+    } catch (err) {
+      const reverted = wasFav
+        ? [...favoritesIds.map(normalizeId), normalizedId]
+        : favoritesIds.map(normalizeId).filter((x) => x !== normalizedId);
+      setFavoritesIds(reverted);
+      await saveFavorites(reverted);
+      return { ok: false, error: err?.message || "Could not update favorite." };
     }
   };
 
@@ -476,7 +546,9 @@ export function ShopProvider({ children }) {
     favoritesIds,
     favoritesDetailed,
     favoritesSet,
+    favoritesLoading,
     toggleFavorite,
+    reloadFavorites,
     user,
     addToCart,
     setQty,

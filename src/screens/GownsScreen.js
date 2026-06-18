@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import { useShop } from "../context/ShopContext";
 import { brand } from "../theme/brand";
 import { normalizeId } from "../utils/id";
+import { handleToggleFavorite } from "../utils/favoritePress";
 
 export function GownsScreen({ navigation, route }) {
   const { gowns, loading, favoritesSet, toggleFavorite } = useShop();
@@ -118,7 +119,7 @@ export function GownsScreen({ navigation, route }) {
       ) : (
         filtered.map((item) => (
           <View style={styles.card} key={item.id}>
-            <Pressable style={styles.favBtn} onPress={() => toggleFavorite(item.id)}>
+            <Pressable style={styles.favBtn} onPress={() => handleToggleFavorite(toggleFavorite, item.id, navigation)}>
               <Ionicons
                 name={favoritesSet?.has(normalizeId(item.id)) ? "heart" : "heart-outline"}
                 size={18}
