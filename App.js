@@ -4,7 +4,7 @@ import { StatusBar } from "expo-status-bar";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ShopProvider } from "./src/context/ShopContext";
 import { AppNavigator } from "./src/navigation/AppNavigator";
-import { loadStoredAdminSecret } from "./src/utils/adminCredentials";
+import { prepareAdminForAppLaunch } from "./src/utils/adminCredentials";
 import { initializeSyncEndpoint } from "./src/services/sync";
 
 export default function App() {
@@ -14,7 +14,7 @@ export default function App() {
     let cancelled = false;
     (async () => {
       try {
-        await Promise.all([loadStoredAdminSecret(), initializeSyncEndpoint()]);
+        await Promise.all([Promise.resolve(prepareAdminForAppLaunch()), initializeSyncEndpoint()]);
       } finally {
         if (!cancelled) setCredentialsReady(true);
       }

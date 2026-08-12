@@ -26,6 +26,8 @@ import { AdminReturnsScreen } from "../screens/AdminReturnsScreen";
 import { AdminGownsScreen } from "../screens/AdminGownsScreen";
 import { AdminStatsScreen } from "../screens/AdminStatsScreen";
 import { AdminUsersScreen } from "../screens/AdminUsersScreen";
+import { AdminAuditScreen } from "../screens/AdminAuditScreen";
+import { AdminChangeSecretScreen } from "../screens/AdminChangeSecretScreen";
 import { canAccess } from "../utils/access";
 import { OrderPlacedScreen } from "../screens/OrderPlacedScreen";
 import { OrderProofSubmittedScreen } from "../screens/OrderProofSubmittedScreen";
@@ -103,6 +105,8 @@ export function AppNavigator() {
         <Stack.Screen name="AdminGowns" component={AdminGownsScreen} options={{ title: "Admin • Gowns" }} />
         <Stack.Screen name="AdminStats" component={AdminStatsScreen} options={{ title: "Admin • Statistics" }} />
         <Stack.Screen name="AdminUsers" component={AdminUsersScreen} options={{ title: "Admin • Users" }} />
+        <Stack.Screen name="AdminAudit" component={AdminAuditScreen} options={{ title: "Admin • Audit Trail" }} />
+        <Stack.Screen name="AdminChangeSecret" component={AdminChangeSecretScreen} options={{ title: "Admin • Change Secret" }} />
       </Stack.Navigator>
     </NavigationContainer>
   );

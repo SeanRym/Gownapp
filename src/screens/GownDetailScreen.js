@@ -245,7 +245,13 @@ export function GownDetailScreen({ route, navigation }) {
                 </View>
               ))}
             </View>
-            <Pressable style={styles.guidePrimaryBtn}>
+            <Pressable
+              style={styles.guidePrimaryBtn}
+              onPress={() => {
+                setShowSizeGuide(false);
+                navigation.navigate("FittingStudio", { gownId: gown.id, panel: "size" });
+              }}
+            >
               <Text style={styles.guidePrimaryText}>Use fit matcher for a personalized recommendation →</Text>
             </Pressable>
           </Pressable>

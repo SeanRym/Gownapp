@@ -2,7 +2,7 @@ import { pushNotification } from "./notifications";
 import { normalizeId, orderMatchesKey } from "../utils/id";
 import { API_BASE_URL, adminAuthHeaders } from "../config/apiEnv";
 
-const STATUS_FLOW = ["placed", "paid", "processing", "shipped", "completed", "cancelled", "refunded"];
+const STATUS_FLOW = ["placed", "paid", "processing", "ready", "shipped", "completed", "cancelled", "refunded"];
 const TRACKING_STATUS_FLOW = [
   "order_placed",
   "preparing_to_ship",
@@ -229,12 +229,23 @@ export async function submitOrder(order) {
   });
 
   const customerName = `${firstName} ${lastName}`.trim() || customerEmail.split("@")[0];
+  const deliveryAddress =
+    deliveryMethod === "lalamove"
+      ? [
+          String(order?.delivery?.address || "").trim(),
+          String(order?.delivery?.city || "").trim(),
+          String(order?.delivery?.province || "").trim(),
+          String(order?.delivery?.zip || "").trim(),
+        ]
+          .filter(Boolean)
+          .join(", ")
+      : "";
   const payload = {
     customerEmail,
     customerName,
-    paymentMethod: String(order?.payment || "gcash").toLowerCase(),
+    paymentMethod: String(order?.payment || "qrph").toLowerCase(),
     deliveryMethod,
-    deliveryAddress: String(order?.delivery?.address || "").trim(),
+    deliveryAddress,
     lalamoveVehicle:
       deliveryMethod === "lalamove"
         ? String(order?.delivery?.lalamoveVehicle || order?.lalamoveVehicle || "sedan").trim().toLowerCase()
@@ -242,6 +253,7 @@ export async function submitOrder(order) {
     items,
     subtotal: Number(order?.subtotal || 0),
     shippingFee: Number(order?.shipping?.shippingFee || order?.shippingFee || 0),
+    tax: Number(order?.businessTax ?? order?.tax ?? 0),
     total: Number(order?.total || order?.subtotal || 0),
     notes: String(order?.notes || "").trim(),
   };
@@ -283,7 +295,12 @@ export async function submitOrder(order) {
     data: { orderId: placedOrder.id, status: placedOrder.status },
   });
 
-  return { ok: true, order: placedOrder };
+  return {
+    ok: true,
+    order: placedOrder,
+    orderId: newId,
+    orderNumber: created?.orderNumber || created?.order_number || placedOrder?.orderNumber || null,
+  };
 }
 
 export async function getOrdersByEmail(email, sessionUserId) {
@@ -416,20 +433,23 @@ export async function reviewOrderPaymentProofAdmin(orderId, payload) {
   }
 }
 
-export async function updateOrderStatusAdmin(orderId, nextStatus) {
+export async function updateOrderStatusAdmin(orderId, nextStatus, opts = {}) {
   const targetStatus = String(nextStatus || "").trim().toLowerCase();
   if (!STATUS_FLOW.includes(targetStatus)) {
     return { ok: false, error: "Invalid status." };
   }
   try {
+    const payload = {
+      action: "status",
+      orderId: normalizeId(orderId),
+      status: targetStatus,
+    };
+    if (opts.force) payload.force = true;
+    if (opts.note) payload.note = String(opts.note || "").trim();
     await requestJson("/api/admin/orders", {
       method: "PATCH",
       headers: adminAuthHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        action: "status",
-        orderId: normalizeId(orderId),
-        status: targetStatus,
-      }),
+      body: JSON.stringify(payload),
     });
     const latest = await getOrderById(orderId);
     return { ok: true, order: latest };

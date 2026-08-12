@@ -66,6 +66,7 @@ export const DELIVERY_LABEL = {
 };
 
 export const PAYMENT_LABEL = {
+  qrph: "QR Ph (GCash / Maya / Bank)",
   gcash: "GCash",
   bdo: "BDO Transfer",
   cash: "Cash on Pickup",
@@ -132,6 +133,7 @@ export function orderNeedsProof(order) {
   return (
     String(order?.status || "").toLowerCase() === "pending_payment" &&
     paymentMethod !== "cash" &&
+    paymentMethod !== "qrph" &&
     proofStatus !== "pending" &&
     proofStatus !== "verified"
   );

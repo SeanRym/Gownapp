@@ -44,6 +44,37 @@ function getBadgeTone(statusLike) {
   return "green";
 }
 
+function getConfirmDescription(action) {
+  const a = String(action || "").toLowerCase();
+  if (a === "paid") return "This will move the order back to \"Paid\". The customer will be notified.";
+  if (a === "ready") return "This will mark the order as \"Ready\" and notify the customer.";
+  if (a === "cancelled") return "This will cancel the order and notify the customer. Stock will be restored. This cannot be undone.";
+  if (a === "refunded") return "This will refund the order and notify the customer. This cannot be undone.";
+  return "This will change the order status and notify the customer.";
+}
+
+function getConfirmTone(action) {
+  const a = String(action || "").toLowerCase();
+  if (["paid", "ready"].includes(a)) return "primary";
+  if (["cancelled", "refunded"].includes(a)) return "danger";
+  return "default";
+}
+
+function getAdminOrderActions(currentStatus) {
+  const status = String(currentStatus || "").toLowerCase();
+  const actions = {
+    placed: ["paid", "cancelled", "refunded"],
+    paid: ["processing", "cancelled", "refunded"],
+    processing: ["paid", "ready", "cancelled", "refunded"],
+    ready: ["shipped", "cancelled", "refunded"],
+    shipped: ["completed", "cancelled", "refunded"],
+    completed: [],
+    cancelled: [],
+    refunded: [],
+  };
+  return actions[status] || [];
+}
+
 export function AdminOrdersScreen() {
   const { user } = useShop();
   const allowed = canAccess(user, "admin_orders");
@@ -60,6 +91,10 @@ export function AdminOrdersScreen() {
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewOrder, setReviewOrder] = useState(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [confirmNote, setConfirmNote] = useState("");
+  const [confirmForce, setConfirmForce] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -94,6 +129,13 @@ export function AdminOrdersScreen() {
     loadData();
   };
 
+  const handleStatusSelection = async (status) => {
+    setConfirmAction(status);
+    setConfirmNote("");
+    setConfirmForce(false);
+    setConfirmOpen(true);
+  };
+
   const onReviewProof = async (orderId, action) => {
     const result = await reviewOrderPaymentProofAdmin(orderId, {
       action,
@@ -114,7 +156,15 @@ export function AdminOrdersScreen() {
   const q = String(query || "").trim().toLowerCase();
   const filtered = orders
     .filter((o) => {
-      if (statusFilter !== "all" && String(o?.status || "").toLowerCase() !== statusFilter) return false;
+      const sf = String(statusFilter || "all");
+      if (sf !== "all") {
+        if (sf === "proof_pending") {
+          const proof = String(o?.paymentProofStatus || o?.proofStatus || "").toLowerCase();
+          if (proof !== "pending") return false;
+        } else {
+          if (String(o?.status || "").toLowerCase() !== sf) return false;
+        }
+      }
       if (!q) return true;
       const hay = [
         o?.id,
@@ -228,17 +278,21 @@ export function AdminOrdersScreen() {
           onChangeText={setQuery}
         />
         <View style={styles.filterRow}>
-          {["all", "placed", "paid", "processing", "shipped", "completed", "cancelled"].map((s) => (
-            <Pressable
-              key={`filter-${s}`}
-              style={[styles.filterPill, statusFilter === s ? styles.filterPillActive : null]}
-              onPress={() => setStatusFilter(s)}
-            >
-              <Text style={statusFilter === s ? styles.filterPillTextActive : styles.filterPillText}>
-                {s === "placed" ? "Pending Payment" : prettyStatus(s)}
-              </Text>
-            </Pressable>
-          ))}
+          {(() => {
+            const proofPendingCount = orders.filter((o) => String(o?.paymentProofStatus || o?.proofStatus || "").toLowerCase() === "pending").length;
+            const filters = ["all", "proof_pending", "placed", "paid", "processing", "ready", "shipped", "completed", "cancelled"];
+            return filters.map((s) => (
+              <Pressable
+                key={`filter-${s}`}
+                style={[styles.filterPill, statusFilter === s ? styles.filterPillActive : null]}
+                onPress={() => setStatusFilter(s)}
+              >
+                <Text style={statusFilter === s ? styles.filterPillTextActive : styles.filterPillText}>
+                  {s === "all" ? "All" : s === "proof_pending" ? `Proof pending (${proofPendingCount})` : s === "placed" ? "Pending Payment" : prettyStatus(s)}
+                </Text>
+              </Pressable>
+            ));
+          })()}
         </View>
       </View>
 
@@ -452,35 +506,134 @@ export function AdminOrdersScreen() {
             <Text style={styles.meta}>Method: {selectedOrder?.payment || "-"}</Text>
 
             <Text style={styles.detailSection}>Update status</Text>
-            <View style={styles.statusRow}>
-              {ORDER_STATUS_OPTIONS.map((s) => (
-                <Pressable
-                  key={`d-status-${s}`}
-                  style={[styles.statusPill, String(selectedOrder?.status || "").toLowerCase() === s ? styles.statusPillActive : null]}
-                  onPress={async () => {
-                    await onUpdateStatus(selectedOrder?.id, s);
-                    const latest = (await getAllOrdersAdmin()).find((x) => idsEqual(x?.id, selectedOrder?.id));
-                    if (latest) setSelectedOrder(latest);
-                  }}
-                >
-                  <Text style={String(selectedOrder?.status || "").toLowerCase() === s ? styles.statusPillTextActive : styles.statusPillText}>
-                    {prettyStatus(s)}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-
-            <View style={styles.row}>
-              <Pressable style={styles.secondaryBtn} onPress={() => onUpdateStatus(selectedOrder?.id, "cancelled")}>
-                <Text style={styles.secondaryBtnText}>Cancel</Text>
-              </Pressable>
-              <Pressable style={styles.dangerBtn} onPress={() => onUpdateStatus(selectedOrder?.id, "refunded")}>
-                <Text style={styles.dangerBtnText}>Refund</Text>
-              </Pressable>
-            </View>
+            {String(selectedOrder?.status || "").toLowerCase() === "completed" ? (
+              <View style={styles.updateDisabledCard}>
+                <Text style={styles.meta}>Customer receives an email on every change.</Text>
+                <Text style={styles.updateDisabledNote}>This order is in a terminal state (Completed) and cannot be changed.</Text>
+              </View>
+            ) : (
+              <>
+                {String(selectedOrder?.status || "").toLowerCase() === "processing" ? (
+                  <>
+                    <Pressable
+                      style={styles.statusActionLarge}
+                      onPress={async () => {
+                        await handleStatusSelection("paid");
+                      }}
+                    >
+                      <Text style={styles.statusActionLargeText}>← Paid</Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.statusActionLarge, styles.statusActionLargePrimary]}
+                      onPress={async () => {
+                        await handleStatusSelection("ready");
+                      }}
+                    >
+                      <Text style={styles.statusActionLargePrimaryText}>Ready →</Text>
+                    </Pressable>
+                    <View style={styles.statusRowSmall}>
+                      <Pressable
+                        style={[styles.statusPill, styles.statusPillDanger, { flex: 1 }]}
+                        onPress={async () => {
+                          await handleStatusSelection("cancelled");
+                        }}
+                      >
+                        <Text style={styles.statusPillDangerText}>Cancelled</Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.statusPill, styles.statusPillDanger, { flex: 1 }]}
+                        onPress={async () => {
+                          await handleStatusSelection("refunded");
+                        }}
+                      >
+                        <Text style={styles.statusPillDangerText}>Refunded</Text>
+                      </Pressable>
+                    </View>
+                  </>
+                ) : (
+                  <View style={styles.statusRow}>
+                    {getAdminOrderActions(selectedOrder?.status).map((s) => {
+                      const tone = getConfirmTone(s);
+                      const label = s === "paid" ? "← Paid" : s === "ready" ? "Ready →" : prettyStatus(s);
+                      return (
+                        <Pressable
+                          key={`d-status-${s}`}
+                          style={[
+                            styles.statusPill,
+                            tone === "primary" ? styles.statusPillPrimary : null,
+                            tone === "danger" ? styles.statusPillDanger : null,
+                          ]}
+                          onPress={async () => {
+                            await handleStatusSelection(s);
+                          }}
+                        >
+                          <Text style={tone === "danger" ? styles.statusPillDangerText : tone === "primary" ? styles.statusPillPrimaryText : styles.statusPillText}>
+                            {label}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                )}
+              </>
+            )}
             <Pressable style={styles.detailCloseBtn} onPress={() => setDetailOpen(false)}>
               <Text style={styles.detailCloseBtnText}>Close</Text>
             </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={confirmOpen} transparent animationType="fade" onRequestClose={() => setConfirmOpen(false)}>
+        <Pressable style={styles.reviewBackdrop} onPress={() => setConfirmOpen(false)}>
+          <Pressable style={styles.reviewModal} onPress={() => {}}>
+            <View style={styles.reviewHeader}>
+              <View>
+                <Text style={styles.detailLabel}>Change to "{prettyStatus(confirmAction)}"?</Text>
+                <Text style={styles.meta}>{getConfirmDescription(confirmAction)}</Text>
+              </View>
+              <Pressable style={styles.detailCloseTopBtn} onPress={() => setConfirmOpen(false)}>
+                <Text style={styles.detailClose}>X</Text>
+              </Pressable>
+            </View>
+            <TextInput
+              style={styles.input}
+              placeholder="Internal note (optional)"
+              value={confirmNote}
+              onChangeText={setConfirmNote}
+            />
+            {String(selectedOrder?.status || "").toLowerCase() === "completed" ? (
+              <Pressable
+                onPress={() => setConfirmForce((p) => !p)}
+                style={[styles.secondaryBtn, { marginBottom: 8, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }]}
+              >
+                <Text style={styles.secondaryBtnText}>Force change (override server rules)</Text>
+                <Text style={{ fontWeight: "800" }}>{confirmForce ? "ON" : "OFF"}</Text>
+              </Pressable>
+            ) : null}
+            <View style={styles.row}>
+              <Pressable style={styles.cancelButton} onPress={() => setConfirmOpen(false)}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                style={[
+                  getConfirmTone(confirmAction) === "primary" ? styles.primaryAction : getConfirmTone(confirmAction) === "danger" ? styles.dangerBtn : styles.verifyBtn,
+                  { flex: 1 },
+                ]}
+                onPress={async () => {
+                  const res = await updateOrderStatusAdmin(selectedOrder?.id, confirmAction, { force: confirmForce, note: confirmNote });
+                  if (!res.ok) {
+                    Alert.alert("Status update failed", res.error || "Could not update order status.");
+                  } else {
+                    setSelectedOrder(res.order || (await getAllOrdersAdmin()).find((x) => idsEqual(x?.id, selectedOrder?.id)));
+                  }
+                  setConfirmOpen(false);
+                  loadData();
+                }}
+              >
+                <Text style={getConfirmTone(confirmAction) === "primary" ? styles.primaryActionText : getConfirmTone(confirmAction) === "danger" ? styles.dangerBtnText : styles.verifyBtnText}>Yes, {prettyStatus(confirmAction)}</Text>
+              </Pressable>
+            </View>
           </Pressable>
         </Pressable>
       </Modal>
@@ -577,9 +730,17 @@ const styles = StyleSheet.create({
   formCard: { marginTop: 8, borderWidth: 1, borderColor: brand.border, borderRadius: 10, backgroundColor: brand.white, padding: 10 },
   formTitle: { color: brand.dark, fontWeight: "800", marginBottom: 8, fontSize: 12 },
   statusRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 },
-  statusPill: { borderWidth: 1, borderColor: brand.border, borderRadius: 999, paddingVertical: 5, paddingHorizontal: 8, backgroundColor: brand.white },
-  statusPillActive: { backgroundColor: brand.button, borderColor: brand.button },
-  statusPillText: { color: brand.dark, fontSize: 11, fontWeight: "700" },
+  statusRowSmall: { flexDirection: "row", gap: 6, marginBottom: 8 },
+  statusActionLarge: { borderWidth: 1, borderColor: brand.border, borderRadius: 14, paddingVertical: 16, paddingHorizontal: 14, backgroundColor: brand.white, marginBottom: 8 },
+  statusActionLargePrimary: { backgroundColor: "#5b31ff", borderColor: "#5b31ff" },
+  statusActionLargeText: { color: brand.dark, fontSize: 14, fontWeight: "800", textAlign: "center" },
+  statusActionLargePrimaryText: { color: brand.white, fontSize: 14, fontWeight: "800", textAlign: "center" },
+  statusPill: { borderWidth: 1, borderColor: brand.border, borderRadius: 999, paddingVertical: 10, paddingHorizontal: 14, backgroundColor: brand.white },
+  statusPillPrimary: { backgroundColor: "#5b31ff", borderColor: "#5b31ff" },
+  statusPillDanger: { backgroundColor: "#fdd0d3", borderColor: "#f7b6bd" },
+  statusPillText: { color: brand.dark, fontSize: 12, fontWeight: "700" },
+  statusPillPrimaryText: { color: brand.white, fontSize: 12, fontWeight: "700" },
+  statusPillDangerText: { color: "#a82949", fontSize: 12, fontWeight: "700" },
   statusPillTextActive: { color: brand.white, fontSize: 11, fontWeight: "700" },
   input: { borderWidth: 1, borderColor: brand.border, backgroundColor: brand.white, padding: 9, marginBottom: 8, fontSize: 12 },
   inputArea: { minHeight: 56, textAlignVertical: "top" },
@@ -642,6 +803,10 @@ const styles = StyleSheet.create({
   },
   verifyBtn: { flex: 1, borderRadius: 8, paddingVertical: 10, backgroundColor: "#111317" },
   verifyBtnText: { color: brand.white, textAlign: "center", fontWeight: "800", fontSize: 11 },
+  cancelButton: { backgroundColor: brand.white, borderWidth: 1, borderColor: brand.border, paddingVertical: 12, borderRadius: 10 },
+  cancelButtonText: { color: brand.dark, fontWeight: "900", fontSize: 11, textAlign: "center" },
+  primaryAction: { flex: 1, borderRadius: 8, paddingVertical: 10, backgroundColor: "#5b31ff", marginLeft: 8 },
+  primaryActionText: { color: brand.white, textAlign: "center", fontWeight: "800", fontSize: 11 },
   detailCloseBtn: {
     marginTop: 12,
     borderWidth: 1,
@@ -652,6 +817,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   detailCloseBtnText: { color: brand.textLight, fontWeight: "700", fontSize: 12 },
+
+  updateDisabledCard: { marginTop: 8, borderWidth: 1, borderColor: brand.border, borderRadius: 10, backgroundColor: "#f5f5f5", padding: 12 },
+  updateDisabledNote: { marginTop: 8, fontStyle: "italic", color: brand.textLight, fontSize: 12 },
 
   deniedWrap: { flex: 1, justifyContent: "center", alignItems: "center", padding: 16, backgroundColor: brand.bg },
   deniedTitle: { fontSize: 18, fontWeight: "900", color: brand.dark },

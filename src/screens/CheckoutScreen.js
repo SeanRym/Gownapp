@@ -1,8 +1,9 @@
-import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useEffect, useMemo, useState } from "react";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useShop } from "../context/ShopContext";
 import { submitOrder } from "../services/orders";
+import { createPaymongoQr, pollPaymongoPayment, switchOrderPaymentMethod } from "../services/payments";
 import { calculateShipping } from "../services/shipping";
 import {
   calculateBusinessTax,
@@ -20,6 +21,36 @@ import { brand } from "../theme/brand";
 function formatPrice(n) {
   return `P${Number(n).toLocaleString("en-PH")}`;
 }
+
+const PAYMENT_METHODS = [
+  {
+    id: "qrph",
+    label: "GCash / Maya / Bank (QR Ph)",
+    icon: "📱",
+    detail: "Scan a QR code to pay instantly — automatically verified.",
+  },
+  {
+    id: "gcash",
+    label: "GCash",
+    icon: "📱",
+    detail: "GCash Number: 09XX-XXX-XXXX · Name: JCE Bridal Boutique",
+  },
+  {
+    id: "bdo",
+    label: "BDO Bank Transfer",
+    icon: "🏦",
+    detail: "BDO Account: 0123-4567-8901 · Account Name: JCE Bridal Boutique",
+  },
+  {
+    id: "cash",
+    label: "Cash on Pickup",
+    icon: "💵",
+    detail: "Pay in full when you collect your order at the boutique.",
+    onlyWith: "pickup",
+  },
+];
+
+const STEPS = ["Review", "Delivery", "Payment", "Confirm", "Pay"];
 
 export function CheckoutScreen({ navigation, route }) {
   const { cartDetailed, subtotal, clearCart, removePurchasedLines, user, reloadGowns } = useShop();
@@ -43,9 +74,18 @@ export function CheckoutScreen({ navigation, route }) {
   const [vehicleFees, setVehicleFees] = useState({});
   const [lalamoveLoading, setLalamoveLoading] = useState(false);
   const [lalamoveError, setLalamoveError] = useState("");
-  const [payment, setPayment] = useState("gcash");
+  const [payment, setPayment] = useState("qrph");
   const [showTerms, setShowTerms] = useState(false);
   const [termsAccepted, setTermsAccepted] = useState(false);
+  const [placedOrderId, setPlacedOrderId] = useState(null);
+  const [placedOrderNumber, setPlacedOrderNumber] = useState(null);
+  const [placedOrder, setPlacedOrder] = useState(null);
+  const [switchingPayment, setSwitchingPayment] = useState(false);
+  const [qrImageUrl, setQrImageUrl] = useState("");
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState("");
+  const [showOtherPayment, setShowOtherPayment] = useState(false);
+  const [orderSnapshot, setOrderSnapshot] = useState(null);
   const [form, setForm] = useState({
     email: user?.email || "",
     firstName: "",
@@ -76,7 +116,79 @@ export function CheckoutScreen({ navigation, route }) {
   const grandTotal = checkoutSubtotal + deliveryFee + businessTax;
   const hasShippingEstimate = deliveryMethod !== "delivery" || lalamoveFee > 0;
   const selectedVehicleMeta = LALAMOVE_VEHICLES.find((v) => v.id === lalamoveVehicle);
-  const steps = ["Review", "Delivery", "Payment", "Confirm"];
+  const deliveryKey = deliveryMethod === "pickup" ? "pickup" : "lalamove";
+  const availablePaymentMethods = PAYMENT_METHODS.filter(
+    (m) => !m.onlyWith || m.onlyWith === deliveryKey
+  );
+  const deliveryLabel = deliveryMethod === "pickup" ? "Store Pickup" : "Lalamove";
+  const deliveryAddressDisplay = [form.address, form.city, form.province, form.zip]
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .join(", ");
+
+  const summaryItems = orderSnapshot?.items ?? checkoutItems;
+  const summarySubtotal = orderSnapshot?.subtotal ?? checkoutSubtotal;
+  const summaryDeliveryFee = orderSnapshot?.deliveryFee ?? deliveryFee;
+  const summaryBusinessTax = orderSnapshot?.businessTax ?? businessTax;
+  const summaryGrandTotal = orderSnapshot?.grandTotal ?? grandTotal;
+  const summaryDeliveryMethod = orderSnapshot?.deliveryMethod ?? deliveryMethod;
+  const summaryHasShippingEstimate =
+    orderSnapshot?.hasShippingEstimate ?? hasShippingEstimate;
+
+  useEffect(() => {
+    if (!availablePaymentMethods.some((m) => m.id === payment)) {
+      setPayment(availablePaymentMethods[0]?.id || "qrph");
+    }
+  }, [availablePaymentMethods, payment]);
+
+  useEffect(() => {
+    if (step !== 4 || !placedOrderId || !user?.id || payment !== "qrph") return;
+    let cancelled = false;
+    let intervalId = null;
+
+    async function bootQr() {
+      setQrLoading(true);
+      setQrError("");
+      try {
+        const data = await createPaymongoQr(placedOrderId, user.id);
+        if (cancelled) return;
+        if (data?.qrImageUrl) setQrImageUrl(String(data.qrImageUrl));
+        else setQrError("Could not generate a QR code right now. You can pay another way below.");
+      } catch (e) {
+        if (!cancelled) setQrError(e?.message || "Could not connect. You can pay another way below.");
+      } finally {
+        if (!cancelled) setQrLoading(false);
+      }
+    }
+
+    bootQr();
+
+    intervalId = setInterval(async () => {
+      try {
+        const data = await pollPaymongoPayment(placedOrderId, user.id);
+        if (cancelled || !data?.ok) return;
+        if (data.qrImageUrl) setQrImageUrl(String(data.qrImageUrl));
+        if (data.paymentStatus === "paid") {
+          clearInterval(intervalId);
+          navigation.replace("OrderPlaced", {
+            orderId: placedOrderId,
+            orderNumber: placedOrderNumber,
+          });
+        }
+        if (data.expired) {
+          clearInterval(intervalId);
+          setShowOtherPayment(true);
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [step, placedOrderId, placedOrderNumber, payment, user?.id, navigation]);
 
   const onChange = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
   const canGoBack = step > 0;
@@ -146,8 +258,10 @@ export function CheckoutScreen({ navigation, route }) {
   };
 
   const validateConfirmStep = () => {
-    if (!String(form.email || "").toLowerCase().endsWith("@gmail.com")) {
-      Alert.alert("Invalid email", "Please update your account email to a valid Gmail address before checkout.");
+    const email = String(form.email || "").trim();
+    const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    if (!emailOk) {
+      Alert.alert("Invalid email", "Please update your account email to a valid email address before checkout.");
       return false;
     }
     if (deliveryMethod === "delivery") {
@@ -189,23 +303,55 @@ export function CheckoutScreen({ navigation, route }) {
   const nextStep = () => {
     if (step === 0 && !validateReviewStep()) return;
     if (step === 1 && !validateDeliveryStep()) return;
+    if (step === 2 && !payment) {
+      Alert.alert("Payment required", "Please select a payment method.");
+      return;
+    }
     setStep((prev) => Math.min(3, prev + 1));
   };
 
   const prevStep = () => {
-    if (!canGoBack) return;
+    if (!canGoBack || step >= 4) return;
     setStep((prev) => Math.max(0, prev - 1));
+  };
+
+  const goToOrderConfirmation = (order, orderId, orderNumber) => {
+    navigation.replace("OrderPlaced", {
+      orderId: orderId || order?.id,
+      orderNumber: orderNumber || order?.orderNumber,
+      order,
+    });
+  };
+
+  const handleSwitchPayment = async (methodId) => {
+    if (!placedOrderId || !user?.id) return;
+    if (methodId === "cash" && deliveryMethod !== "pickup") {
+      Alert.alert("Not available", "Cash on pickup is only available for store pickup orders.");
+      return;
+    }
+    setSwitchingPayment(true);
+    try {
+      await switchOrderPaymentMethod(placedOrderId, methodId, user.id);
+      const nextOrder = {
+        ...(placedOrder || {}),
+        id: placedOrderId,
+        orderNumber: placedOrderNumber,
+        payment: methodId,
+        paymentMethod: methodId,
+      };
+      goToOrderConfirmation(nextOrder, placedOrderId, placedOrderNumber);
+    } catch (e) {
+      Alert.alert("Could not switch payment", e?.message || "Please try again.");
+    } finally {
+      setSwitchingPayment(false);
+    }
   };
 
   const placeOrder = async () => {
     if (checkoutItems.length === 0) return;
     if (!validateConfirmStep()) return;
     if (!termsAccepted) {
-      Alert.alert("Terms required", "Please read and agree to the Terms & Conditions before placing your order.");
-      return;
-    }
-    if (step < 3) {
-      setStep(3);
+      setShowTerms(true);
       return;
     }
     setSubmitting(true);
@@ -263,6 +409,24 @@ export function CheckoutScreen({ navigation, route }) {
         total: grandTotal,
         createdAt: new Date().toISOString(),
       });
+
+      setOrderSnapshot({
+        items: checkoutItems.map((i) => ({
+          id: i.id,
+          name: i.name,
+          image: i.image,
+          size: i.size,
+          qty: i.qty,
+          subtotal: i.subtotal,
+        })),
+        subtotal: checkoutSubtotal,
+        deliveryFee,
+        businessTax,
+        grandTotal,
+        deliveryMethod,
+        hasShippingEstimate,
+      });
+
       const purchasedLineKeys = checkoutItems.map((item) => item.lineKey).filter(Boolean);
       if (purchasedLineKeys.length > 0) {
         const removeResult = await removePurchasedLines(purchasedLineKeys);
@@ -273,11 +437,21 @@ export function CheckoutScreen({ navigation, route }) {
         await clearCart();
       }
       await reloadGowns();
-      navigation.replace("OrderPlaced", {
-        orderId: response?.order?.id || response?.order?.orderNumber,
-        orderNumber: response?.order?.orderNumber,
-        order: response?.order,
-      });
+
+      const oid = response?.orderId || response?.order?.id;
+      const onum = response?.orderNumber || response?.order?.orderNumber;
+
+      if (payment === "qrph") {
+        setPlacedOrder(response?.order || null);
+        setPlacedOrderId(oid);
+        setPlacedOrderNumber(onum);
+        setShowOtherPayment(false);
+        setQrImageUrl("");
+        setStep(4);
+        return;
+      }
+
+      goToOrderConfirmation(response?.order, oid, onum);
     } catch (e) {
       Alert.alert("Order failed", e.message);
     } finally {
@@ -291,9 +465,13 @@ export function CheckoutScreen({ navigation, route }) {
     return (
       <View style={styles.stepWrap}>
         <View style={[styles.stepDot, active ? styles.stepDotActive : null, done ? styles.stepDotDone : null]}>
-          <Text style={[styles.stepDotText, active || done ? styles.stepDotTextActive : null]}>{index + 1}</Text>
+          <Text style={[styles.stepDotText, active || done ? styles.stepDotTextActive : null]}>
+            {done ? "✓" : index + 1}
+          </Text>
         </View>
-        <Text style={[styles.stepLabel, active ? styles.stepLabelActive : null]}>{label}</Text>
+        <Text style={[styles.stepLabel, active ? styles.stepLabelActive : null]} numberOfLines={1}>
+          {label}
+        </Text>
       </View>
     );
   };
@@ -301,10 +479,10 @@ export function CheckoutScreen({ navigation, route }) {
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Checkout</Text>
-      <Text style={styles.subTitle}>Complete your order in 4 simple steps.</Text>
+      <Text style={styles.subTitle}>Complete your order in 5 simple steps.</Text>
 
       <View style={styles.stepsRow}>
-        {steps.map((item, index) => (
+        {STEPS.map((item, index) => (
           <StepPill key={item} label={item} index={index} />
         ))}
       </View>
@@ -467,96 +645,104 @@ export function CheckoutScreen({ navigation, route }) {
         {step === 2 ? (
           <>
             <Text style={styles.sectionTitle}>Payment method</Text>
-            <Pressable style={[styles.optionCard, payment === "gcash" ? styles.optionCardActive : null]} onPress={() => setPayment("gcash")}>
-              <View style={styles.optionTopRow}>
-                <Text style={styles.optionTitle}>GCash</Text>
-                <View style={[styles.radio, payment === "gcash" ? styles.radioActive : null]}>
-                  {payment === "gcash" ? <View style={styles.radioInner} /> : null}
+            {availablePaymentMethods.map((opt) => (
+              <Pressable
+                key={opt.id}
+                style={[styles.optionCard, payment === opt.id ? styles.optionCardActive : null]}
+                onPress={() => setPayment(opt.id)}
+              >
+                <View style={styles.paymentOptionRow}>
+                  <Text style={styles.paymentIcon}>{opt.icon}</Text>
+                  <View style={styles.paymentOptionText}>
+                    <Text style={styles.optionTitle}>{opt.label}</Text>
+                    <Text style={styles.optionDesc}>{opt.detail}</Text>
+                  </View>
+                  <View style={[styles.radio, payment === opt.id ? styles.radioActive : null]}>
+                    {payment === opt.id ? <View style={styles.radioInner} /> : null}
+                  </View>
                 </View>
-              </View>
-              {payment === "gcash" ? (
-                <>
-                  <Text style={styles.optionDesc}>GCash Number: 09XX-XXX-XXXX - Name: JCE Bridal Boutique</Text>
-                </>
-              ) : null}
-            </Pressable>
-            <Pressable style={[styles.optionCard, payment === "bdo" ? styles.optionCardActive : null]} onPress={() => setPayment("bdo")}>
-              <View style={styles.optionTopRow}>
-                <Text style={styles.optionTitle}>BDO Bank Transfer</Text>
-                <View style={[styles.radio, payment === "bdo" ? styles.radioActive : null]}>
-                  {payment === "bdo" ? <View style={styles.radioInner} /> : null}
-                </View>
-              </View>
-              {payment === "bdo" ? (
-                <>
-                  <Text style={styles.optionDesc}>BDO Account: 0121-4567-3001</Text>
-                  <Text style={styles.optionSubDesc}>Account Name: JCE Bridal Boutique</Text>
-                </>
-              ) : null}
-            </Pressable>
-            <Pressable style={[styles.optionCard, payment === "cash" ? styles.optionCardActive : null]} onPress={() => setPayment("cash")}>
-              <View style={styles.optionTopRow}>
-                <Text style={styles.optionTitle}>Cash on Pickup</Text>
-                <View style={[styles.radio, payment === "cash" ? styles.radioActive : null]}>
-                  {payment === "cash" ? <View style={styles.radioInner} /> : null}
-                </View>
-              </View>
-              {payment === "cash" ? (
-                <Text style={styles.optionDesc}>Pay in full when you collect your order at the boutique.</Text>
-              ) : null}
-            </Pressable>
-            {payment !== "cash" ? (
-              <View style={styles.noticeBox}>
-                <Text style={styles.noticeText}><Text style={styles.noticeStrong}>How to pay:</Text></Text>
-                <Text style={styles.noticeText}>1. Send the exact amount to the account above.</Text>
-                <Text style={styles.noticeText}>2. Screenshot your payment confirmation.</Text>
-                <Text style={styles.noticeText}>3. Upload your proof on the next page after placing your order.</Text>
-                <Text style={styles.noticeText}><Text style={styles.noticeStrong}>Orders without proof within 24 hours may be cancelled.</Text></Text>
-              </View>
-            ) : null}
+              </Pressable>
+            ))}
           </>
         ) : null}
 
         {step === 3 ? (
           <>
-            <Text style={styles.sectionTitle}>Review & place order</Text>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Items subtotal</Text>
-              <Text style={styles.summaryValue}>{formatPrice(checkoutSubtotal)}</Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Delivery</Text>
-              <Text style={styles.summaryValue}>
-                {deliveryMethod === "pickup"
-                  ? "Store pickup"
-                  : hasShippingEstimate
-                    ? formatPrice(deliveryFee)
-                    : "TBD"}
-              </Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Business tax (3%)</Text>
-              <Text style={styles.summaryValue}>
-                {deliveryMethod === "delivery" && !hasShippingEstimate ? "TBD" : formatPrice(businessTax)}
-              </Text>
-            </View>
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Estimated arrival</Text>
-              <Text style={styles.summaryValue}>{deliveryMethod === "pickup" ? "Ready for pickup notice" : shipping.etaLabel}</Text>
-            </View>
-            <View style={styles.summaryLine} />
-            <View style={styles.summaryRow}>
-              <Text style={styles.summaryLabel}>Grand total</Text>
-              <Text style={styles.summaryTotal}>{formatPrice(grandTotal)}</Text>
+            <Text style={styles.sectionTitle}>Confirm your order</Text>
+
+            <Text style={styles.confirmLabel}>Items</Text>
+            {checkoutItems.map((item, index) => (
+              <View key={`confirm-${item.id}-${index}`} style={styles.confirmItemRow}>
+                <Text style={styles.confirmItemText}>
+                  {item.name}
+                  {item.size ? ` — ${item.size}` : ""} ×{item.qty}
+                </Text>
+                <Text style={styles.confirmItemPrice}>{formatPrice(item.subtotal)}</Text>
+              </View>
+            ))}
+
+            <Text style={styles.confirmLabel}>Delivery</Text>
+            <Text style={styles.confirmValue}>{deliveryLabel}</Text>
+            {deliveryMethod === "delivery" ? (
+              <>
+                <Text style={styles.confirmSub}>
+                  {selectedVehicleMeta?.label || "Sedan"} vehicle
+                </Text>
+                {deliveryAddressDisplay ? (
+                  <Text style={styles.confirmSub}>{deliveryAddressDisplay}</Text>
+                ) : null}
+                <Text style={styles.confirmSub}>
+                  Estimated delivery fee: {hasShippingEstimate ? formatPrice(deliveryFee) : "TBD"} · Final fee
+                  confirmed before dispatch.
+                </Text>
+              </>
+            ) : null}
+
+            <View style={styles.confirmTotals}>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Subtotal</Text>
+                <Text style={styles.summaryValue}>{formatPrice(checkoutSubtotal)}</Text>
+              </View>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>
+                  Shipping{deliveryMethod === "delivery" ? " (Lalamove est.)" : ""}
+                </Text>
+                <Text style={styles.summaryValue}>
+                  {deliveryMethod === "pickup"
+                    ? "Free"
+                    : hasShippingEstimate
+                      ? formatPrice(deliveryFee)
+                      : "TBD"}
+                </Text>
+              </View>
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Business tax (3%)</Text>
+                <Text style={styles.summaryValue}>
+                  {deliveryMethod === "delivery" && !hasShippingEstimate ? "TBD" : formatPrice(businessTax)}
+                </Text>
+              </View>
+              <View style={styles.summaryLine} />
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabel}>Total</Text>
+                <Text style={styles.summaryTotal}>{formatPrice(grandTotal)}</Text>
+              </View>
             </View>
 
-            <Pressable style={styles.termsRow} onPress={() => setShowTerms(true)}>
+            <Pressable
+              style={styles.termsRow}
+              onPress={() => {
+                if (termsAccepted) setTermsAccepted(false);
+                else setShowTerms(true);
+              }}
+            >
               <View style={[styles.checkbox, termsAccepted ? styles.checkboxChecked : null]}>
                 {termsAccepted ? <Text style={styles.checkboxTick}>✓</Text> : null}
               </View>
               <Text style={styles.termsText}>
                 I have read and agree to the{" "}
-                <Text style={styles.termsLink}>Terms & Conditions</Text>
+                <Text style={styles.termsLink} onPress={() => setShowTerms(true)}>
+                  Terms & Conditions
+                </Text>
               </Text>
             </Pressable>
             {!termsAccepted ? (
@@ -564,11 +750,74 @@ export function CheckoutScreen({ navigation, route }) {
             ) : null}
           </>
         ) : null}
+
+        {step === 4 ? (
+          <>
+            <Text style={styles.sectionTitle}>Payment</Text>
+            <Text style={styles.qrOrderNote}>
+              Order {placedOrderNumber || placedOrderId} placed — complete payment to finish.
+            </Text>
+
+            {!showOtherPayment ? (
+              <>
+                <View style={styles.qrBox}>
+                  {qrLoading && !qrImageUrl ? (
+                    <>
+                      <ActivityIndicator size="small" color={brand.dark} />
+                      <Text style={styles.qrLoadingText}>Generating your QR code…</Text>
+                    </>
+                  ) : qrImageUrl ? (
+                    <>
+                      <Text style={styles.qrScanText}>Scan to pay with GCash, Maya, or your bank</Text>
+                      <Image source={{ uri: qrImageUrl }} style={styles.qrImage} resizeMode="contain" />
+                      <Text style={styles.qrAutoText}>
+                        This page updates automatically once payment is received — no need to refresh.
+                      </Text>
+                    </>
+                  ) : (
+                    <Text style={styles.qrErrorText}>{qrError || "Could not load QR code."}</Text>
+                  )}
+                </View>
+                <Pressable style={styles.linkBtn} onPress={() => setShowOtherPayment(true)}>
+                  <Text style={styles.linkBtnText}>Pay another way →</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Text style={styles.confirmSub}>
+                  Choose another payment method. You'll upload proof of payment on the next page.
+                </Text>
+                {PAYMENT_METHODS.filter((m) => m.id !== "qrph" && (!m.onlyWith || m.onlyWith === deliveryKey)).map(
+                  (opt) => (
+                  <Pressable
+                    key={`alt-${opt.id}`}
+                    style={styles.optionCard}
+                    disabled={switchingPayment}
+                    onPress={() => handleSwitchPayment(opt.id)}
+                  >
+                    <View style={styles.paymentOptionRow}>
+                      <Text style={styles.paymentIcon}>{opt.icon}</Text>
+                      <View style={styles.paymentOptionText}>
+                        <Text style={styles.optionTitle}>{opt.label}</Text>
+                        <Text style={styles.optionDesc}>{opt.detail}</Text>
+                      </View>
+                    </View>
+                  </Pressable>
+                  )
+                )}
+                {switchingPayment ? <Text style={styles.confirmSub}>Switching payment method…</Text> : null}
+                <Pressable style={styles.linkBtn} onPress={() => setShowOtherPayment(false)}>
+                  <Text style={styles.linkBtnText}>← Back to QR Ph payment</Text>
+                </Pressable>
+              </>
+            )}
+          </>
+        ) : null}
       </View>
 
       <View style={styles.summaryCard}>
         <Text style={styles.summaryTitle}>Order Summary</Text>
-        {checkoutItems.map((item, index) => (
+        {summaryItems.map((item, index) => (
           <View key={`summary-${item.id}-${index}`} style={styles.summaryItemRow}>
             <Image source={{ uri: item.image }} style={styles.summaryThumb} />
             <View style={styles.summaryItemMeta}>
@@ -581,31 +830,35 @@ export function CheckoutScreen({ navigation, route }) {
         <View style={styles.summaryLine} />
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Subtotal</Text>
-          <Text style={styles.summaryValue}>{formatPrice(checkoutSubtotal)}</Text>
+          <Text style={styles.summaryValue}>{formatPrice(summarySubtotal)}</Text>
         </View>
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Shipping</Text>
           <Text style={styles.summaryValue}>
-            {deliveryMethod === "pickup"
-              ? formatPrice(0)
-              : hasShippingEstimate
-                ? formatPrice(deliveryFee)
+            {summaryDeliveryMethod === "pickup"
+              ? "free"
+              : summaryHasShippingEstimate
+                ? formatPrice(summaryDeliveryFee)
                 : "TBD"}
           </Text>
         </View>
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Business tax (3%)</Text>
           <Text style={styles.summaryValue}>
-            {deliveryMethod === "delivery" && !hasShippingEstimate ? "TBD" : formatPrice(businessTax)}
+            {summaryDeliveryMethod === "delivery" && !summaryHasShippingEstimate
+              ? "TBD"
+              : formatPrice(summaryBusinessTax)}
           </Text>
         </View>
         <View style={styles.summaryRow}>
           <Text style={styles.summaryLabel}>Total</Text>
           <Text style={styles.summaryTotal}>
-            {deliveryMethod === "delivery" && !hasShippingEstimate ? "TBD" : formatPrice(grandTotal)}
+            {summaryDeliveryMethod === "delivery" && !summaryHasShippingEstimate
+              ? "TBD"
+              : formatPrice(summaryGrandTotal)}
           </Text>
         </View>
-        {deliveryMethod === "delivery" && !hasShippingEstimate ? (
+        {summaryDeliveryMethod === "delivery" && !summaryHasShippingEstimate ? (
           <Text style={styles.summaryNote}>* Enter your address to calculate shipping and total</Text>
         ) : null}
       </View>
@@ -615,7 +868,7 @@ export function CheckoutScreen({ navigation, route }) {
           <>
             <Pressable style={styles.primaryBtn} onPress={nextStep}>
               <Text style={styles.primaryBtnText}>
-                {step === 0 ? "Continue to Delivery" : step === 1 ? "Continue to Payment" : "Review & Confirm"}
+                {step === 0 ? "Continue to Delivery" : step === 1 ? "Continue to Payment" : "Continue →"}
               </Text>
             </Pressable>
             {canGoBack ? (
@@ -624,10 +877,10 @@ export function CheckoutScreen({ navigation, route }) {
               </Pressable>
             ) : null}
           </>
-        ) : (
+        ) : step === 3 ? (
           <>
             <Pressable style={styles.primaryBtn} onPress={placeOrder} disabled={submitting}>
-              <Text style={styles.primaryBtnText}>{submitting ? "Placing order..." : "Place Order"}</Text>
+              <Text style={styles.primaryBtnText}>{submitting ? "Placing order…" : "Place Order"}</Text>
             </Pressable>
             {canGoBack ? (
               <Pressable style={styles.backBtn} onPress={prevStep}>
@@ -635,7 +888,7 @@ export function CheckoutScreen({ navigation, route }) {
               </Pressable>
             ) : null}
           </>
-        )}
+        ) : null}
       </View>
 
       <Modal visible={showTerms} animationType="fade" transparent onRequestClose={() => setShowTerms(false)}>
@@ -736,6 +989,48 @@ const styles = StyleSheet.create({
   optionTitle: { color: brand.dark, fontWeight: "700", marginBottom: 2 },
   optionDesc: { color: brand.textLight, fontSize: 12 },
   optionSubDesc: { color: brand.textLight, fontSize: 11, marginTop: 2 },
+  paymentOptionRow: { flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  paymentIcon: { fontSize: 22, marginTop: 2 },
+  paymentOptionText: { flex: 1, paddingRight: 8 },
+  confirmLabel: {
+    color: brand.textLight,
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+    textTransform: "uppercase",
+    marginTop: 10,
+    marginBottom: 4,
+  },
+  confirmItemRow: { flexDirection: "row", justifyContent: "space-between", gap: 10, marginBottom: 4 },
+  confirmItemText: { flex: 1, color: brand.dark, fontSize: 13 },
+  confirmItemPrice: { color: brand.dark, fontWeight: "700", fontSize: 13 },
+  confirmValue: { color: brand.dark, fontWeight: "700", fontSize: 14 },
+  confirmSub: { color: brand.textLight, fontSize: 12, lineHeight: 18, marginTop: 2 },
+  confirmTotals: {
+    marginTop: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: brand.border,
+    gap: 6,
+  },
+  qrOrderNote: { color: brand.textLight, fontSize: 13, marginBottom: 10, lineHeight: 18 },
+  qrBox: {
+    backgroundColor: "#F5EADC",
+    borderWidth: 1,
+    borderColor: brand.border,
+    borderRadius: 12,
+    padding: 16,
+    alignItems: "center",
+    minHeight: 180,
+    justifyContent: "center",
+  },
+  qrLoadingText: { color: brand.textLight, fontSize: 14 },
+  qrScanText: { color: brand.dark, fontWeight: "600", fontSize: 14, marginBottom: 12, textAlign: "center" },
+  qrImage: { width: 220, height: 220, backgroundColor: brand.white, borderRadius: 8 },
+  qrAutoText: { color: brand.textLight, fontSize: 11, marginTop: 12, textAlign: "center", lineHeight: 16 },
+  qrErrorText: { color: "#8A1D1D", fontSize: 13, textAlign: "center", lineHeight: 18 },
+  linkBtn: { alignSelf: "center", marginTop: 12, paddingVertical: 8 },
+  linkBtnText: { color: brand.dark, fontWeight: "700", fontSize: 13, textDecorationLine: "underline" },
   radio: { width: 18, height: 18, borderRadius: 9, borderWidth: 1, borderColor: "#B7A8AF", alignItems: "center", justifyContent: "center", backgroundColor: brand.white },
   radioActive: { borderColor: brand.dark },
   radioInner: { width: 8, height: 8, borderRadius: 4, backgroundColor: brand.dark },

@@ -43,6 +43,11 @@ const adminSecret = String(process.env.EXPO_PUBLIC_ADMIN_SECRET || "").trim();
 module.exports = {
   expo: {
     ...appJson.expo,
+    android: {
+      ...(appJson.expo?.android || {}),
+      softwareKeyboardLayoutMode: "pan",
+    },
+    plugins: [...(appJson.expo?.plugins || []), "@react-native-community/datetimepicker"],
     extra: {
       ...(appJson.expo?.extra || {}),
       eas: {

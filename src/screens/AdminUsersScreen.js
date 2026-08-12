@@ -3,11 +3,11 @@ import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View 
 import { useFocusEffect } from "@react-navigation/native";
 import { useShop } from "../context/ShopContext";
 import { canAccess } from "../utils/access";
-import { createUserAdmin, deleteUserAdmin, listUsersAdmin, updateUserRoleAdmin } from "../services/authLocal";
+import { createUserAdmin, deleteUserAdmin, listUsersAdmin, updateUserRoleAdmin, restoreUserAdmin } from "../services/authLocal";
 import { brand } from "../theme/brand";
 
-const ROLE_OPTIONS = ["admin", "staff"];
-const EMPTY_FORM = { name: "", email: "", password: "", role: "staff" };
+const ROLE_OPTIONS = ["customer", "staff", "admin"];
+const EMPTY_FORM = { firstName: "", lastName: "", email: "", role: "customer" };
 const FILTER_OPTIONS = ["all", "customer", "staff", "admin"];
 
 export function AdminUsersScreen() {
@@ -85,6 +85,15 @@ export function AdminUsersScreen() {
     loadData();
   };
 
+  const onRestore = async (id, email) => {
+    const res = await restoreUserAdmin({ id, email });
+    if (!res.ok) {
+      Alert.alert("Restore failed", res.error || "Unable to restore user.");
+      return;
+    }
+    loadData();
+  };
+
   const initials = useCallback((name, email) => {
     const base = String(name || "").trim() || String(email || "").split("@")[0] || "U";
     const parts = base.split(/\s+/).filter(Boolean);
@@ -106,6 +115,12 @@ export function AdminUsersScreen() {
     if (tab === "archived") return visibleUsers.filter((u) => u?.isActive === false);
     return visibleUsers.filter((u) => u?.isActive !== false);
   }, [tab, visibleUsers]);
+
+  const roleLabel = (role) => {
+    const normalized = String(role || "customer").trim().toLowerCase();
+    if (!normalized) return "Customer";
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  };
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
@@ -222,43 +237,90 @@ export function AdminUsersScreen() {
                 <Text style={styles.userStatusArchived}>• Archived</Text>
               </View>
             </View>
+            <View style={styles.row}>
+              <Pressable
+                style={[styles.primaryBtn, styles.actionButton]}
+                onPress={() =>
+                  Alert.alert("Restore user", `Restore ${u.email}?`, [
+                    { text: "Cancel", style: "cancel" },
+                    { text: "Restore", onPress: () => onRestore(u.id, u.email) },
+                  ])
+                }
+              >
+                <Text style={styles.primaryBtnText}>Restore</Text>
+              </Pressable>
+            </View>
           </View>
         ))}
 
       <Modal visible={editorOpen} transparent animationType="fade" onRequestClose={() => setEditorOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setEditorOpen(false)}>
           <Pressable style={styles.modalCard} onPress={() => {}}>
-            <Text style={styles.cardTitle}>Add user</Text>
-            <TextInput style={styles.input} placeholder="Full name" value={form.name} onChangeText={(v) => setForm((p) => ({ ...p, name: v }))} />
-            <TextInput
-              style={styles.input}
-              placeholder="Email"
-              value={form.email}
-              autoCapitalize="none"
-              keyboardType="email-address"
-              onChangeText={(v) => setForm((p) => ({ ...p, email: v }))}
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="Temporary password"
-              value={form.password}
-              secureTextEntry
-              onChangeText={(v) => setForm((p) => ({ ...p, password: v }))}
-            />
-            <View style={styles.roleRow}>
-              {ROLE_OPTIONS.map((r) => (
-                <Pressable
-                  key={r}
-                  style={[styles.rolePill, form.role === r ? styles.rolePillActive : null]}
-                  onPress={() => setForm((p) => ({ ...p, role: r }))}
-                >
-                  <Text style={form.role === r ? styles.roleTextActive : styles.roleText}>{r}</Text>
-                </Pressable>
-              ))}
+            <View style={styles.modalHeader}>
+              <Text style={styles.cardTitle}>All User</Text>
+              <Pressable style={styles.closeButton} onPress={() => setEditorOpen(false)}>
+                <Text style={styles.closeButtonText}>×</Text>
+              </Pressable>
             </View>
-            <Pressable style={styles.primaryBtn} onPress={onCreate}>
-              <Text style={styles.primaryBtnText}>Create user</Text>
-            </Pressable>
+
+            <View style={styles.formTwoCol}>
+              <View style={styles.formFieldHalf}>
+                <Text style={styles.fieldLabel}>First name</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Maria"
+                  value={form.firstName}
+                  autoCapitalize="words"
+                  onChangeText={(v) => setForm((p) => ({ ...p, firstName: v }))}
+                />
+              </View>
+              <View style={styles.formFieldHalf}>
+                <Text style={styles.fieldLabel}>Last name</Text>
+                <TextInput
+                  style={styles.input}
+                  placeholder="Santos"
+                  value={form.lastName}
+                  autoCapitalize="words"
+                  onChangeText={(v) => setForm((p) => ({ ...p, lastName: v }))}
+                />
+              </View>
+            </View>
+
+            <View style={styles.formFieldFull}>
+              <Text style={styles.fieldLabel}>Email</Text>
+              <TextInput
+                style={styles.input}
+                placeholder="user@example.com"
+                value={form.email}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                onChangeText={(v) => setForm((p) => ({ ...p, email: v }))}
+              />
+            </View>
+
+            <View style={styles.formFieldFull}>
+              <Text style={styles.fieldLabel}>Role</Text>
+              <View style={styles.roleSelectWrap}>
+                <Pressable style={styles.roleSelect} onPress={() => {
+                  const nextIndex = (ROLE_OPTIONS.indexOf(form.role) + 1) % ROLE_OPTIONS.length;
+                  setForm((p) => ({ ...p, role: ROLE_OPTIONS[nextIndex] }));
+                }}>
+                  <Text style={styles.roleSelectValue}>{roleLabel(form.role)}</Text>
+                  <Text style={styles.roleChevron}>⌄</Text>
+                </Pressable>
+              </View>
+            </View>
+
+            <Text style={styles.helperText}>A temporary password will be generated. The user can change it after logging in.</Text>
+
+            <View style={styles.modalActionRow}>
+              <Pressable style={[styles.cancelButton, styles.actionButton]} onPress={() => setEditorOpen(false)}>
+                <Text style={styles.cancelButtonText}>Cancel</Text>
+              </Pressable>
+              <Pressable style={[styles.primaryBtn, styles.actionButton]} onPress={onCreate}>
+                <Text style={styles.primaryBtnText}>Create user</Text>
+              </Pressable>
+            </View>
           </Pressable>
         </Pressable>
       </Modal>
@@ -292,8 +354,16 @@ const styles = StyleSheet.create({
   tabText: { color: brand.textLight, fontWeight: "700", fontSize: 12 },
   tabTextActive: { color: brand.dark, fontWeight: "900", fontSize: 12 },
 
-  cardTitle: { color: brand.dark, fontWeight: "900", marginBottom: 10 },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 10 },
+  cardTitle: { color: brand.dark, fontWeight: "900", fontSize: 24, marginBottom: 0 },
+  closeButton: { width: 28, height: 28, borderRadius: 14, alignItems: "center", justifyContent: "center", backgroundColor: "transparent" },
+  closeButtonText: { color: brand.textLight, fontSize: 26, fontWeight: "500", lineHeight: 26 },
   input: { borderWidth: 1, borderColor: brand.border, backgroundColor: brand.white, borderRadius: 8, padding: 11, marginBottom: 9 },
+  formTwoCol: { flexDirection: "row", gap: 10, alignItems: "stretch" },
+  formFieldHalf: { flex: 1 },
+  formFieldFull: { marginBottom: 4 },
+  fieldLabel: { color: "#b47b35", fontWeight: "800", fontSize: 12, marginBottom: 4, textTransform: "capitalize" },
+  helperText: { color: brand.textLight, fontSize: 11, lineHeight: 16, marginTop: 8, marginBottom: 12 },
 
   roleRow: { flexDirection: "row", gap: 8, marginBottom: 10 },
   rolePill: { flex: 1, borderWidth: 1, borderColor: brand.border, borderRadius: 999, paddingVertical: 8, backgroundColor: brand.white },
@@ -301,6 +371,15 @@ const styles = StyleSheet.create({
   roleText: { textAlign: "center", fontWeight: "900", fontSize: 11, color: brand.textLight },
   roleTextActive: { textAlign: "center", fontWeight: "900", fontSize: 11, color: brand.white },
 
+  roleSelectWrap: { marginBottom: 8 },
+  roleSelect: { borderWidth: 1, borderColor: brand.border, borderRadius: 8, backgroundColor: brand.white, paddingHorizontal: 12, paddingVertical: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  roleSelectValue: { textTransform: "capitalize", fontSize: 12, color: brand.dark, fontWeight: "700" },
+  roleChevron: { color: brand.textLight, fontSize: 18, fontWeight: "900" },
+
+  modalActionRow: { flexDirection: "row", gap: 12, marginTop: 8, justifyContent: "space-between" },
+  actionButton: { flex: 1, alignItems: "center", justifyContent: "center" },
+  cancelButton: { backgroundColor: brand.white, borderWidth: 1, borderColor: brand.border, paddingVertical: 12, borderRadius: 10 },
+  cancelButtonText: { color: brand.dark, fontWeight: "900", fontSize: 11, textAlign: "center" },
   primaryBtn: { backgroundColor: brand.buttonAlt, paddingVertical: 12, borderRadius: 10 },
   primaryBtnText: { color: brand.white, textAlign: "center", fontWeight: "900", letterSpacing: 0.8, fontSize: 11 },
 

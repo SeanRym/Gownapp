@@ -11,4 +11,6 @@ export const brand = {
   button: "#1F141A",
   buttonAlt: "#C49B6C",
   border: "#EBDADF",
+  /** Visible on white inputs (Android secure fields often ignore placeholderTextColor). */
+  placeholder: "#6B5B63",
 };

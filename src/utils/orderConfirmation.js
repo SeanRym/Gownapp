@@ -23,6 +23,7 @@ export const ORDER_STATUS_LABELS = {
 
 export function paymentMethodLabel(payment) {
   const p = String(payment || "").toLowerCase();
+  if (p === "qrph") return "GCash / Maya / Bank (QR Ph)";
   if (p === "bdo") return "BDO Bank Transfer";
   if (p === "cash") return "Cash on Pickup";
   return "GCash";
@@ -80,6 +81,16 @@ export function getWhatHappensNextSteps(order) {
       "Our team will prepare your order and notify you when it's ready",
       "Collect at the boutique — Mon–Sat 9AM–6PM",
     ];
+  }
+
+  if (payment === "qrph") {
+    const steps = ["Your order is being prepared"];
+    if (delivery === "delivery" || delivery === "lalamove") {
+      steps.push("We'll arrange Lalamove and notify you of the delivery fee");
+    } else {
+      steps.push("We'll notify you when your order is ready for pickup");
+    }
+    return steps;
   }
 
   const proofStatus = resolveProofStatus(order);

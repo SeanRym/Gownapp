@@ -1,6 +1,5 @@
-import { Alert, Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
+import { Pressable, StyleSheet, Text, TextInput, View, useWindowDimensions } from "react-native";
 import { useState } from "react";
-import { sendLoginOtp, verifyLoginOtp } from "../services/auth";
 import { useShop } from "../context/ShopContext";
 import { verifyLoginCredentials } from "../services/authLocal";
 import { brand } from "../theme/brand";
@@ -11,43 +10,34 @@ export function LoginScreen({ navigation }) {
   const { login } = useShop();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState("");
-  const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [loginError, setLoginError] = useState("");
 
-  const onSendOtp = async () => {
-    if (!email || !password) return;
-    setLoading(true);
-    try {
-      const check = await verifyLoginCredentials({ email: email.trim(), password });
-      if (!check.ok) throw new Error(check.error || "Invalid email or password.");
-      const otpResult = await sendLoginOtp(email.trim());
-      Alert.alert("OTP (dev mode)", `Use this code: ${otpResult.otp}`);
-      setStep(2);
-    } catch (e) {
-      Alert.alert("Login failed", e.message);
-    } finally {
-      setLoading(false);
+  const onLogin = async () => {
+    const cleanEmail = String(email || "").trim();
+    if (!cleanEmail || !password) {
+      setLoginError("Please enter your email and password.");
+      return;
     }
-  };
-
-  const onVerify = async () => {
-    if (otp.length !== 6) return;
+    setLoginError("");
     setLoading(true);
     try {
-      await verifyLoginOtp(email.trim(), otp.trim());
-      const check = await verifyLoginCredentials({ email: email.trim(), password });
-      if (!check.ok || !check.user) throw new Error("Login failed");
+      const check = await verifyLoginCredentials({ email: cleanEmail, password });
+      if (!check.ok || !check.user) {
+        throw new Error(check.error || "Invalid email or password.");
+      }
       await login({
         id: check.user.id,
         name: check.user.name,
         email: check.user.email,
-        role: check.user.role || (String(check.user.email || "").toLowerCase().includes("admin") ? "admin" : "customer"),
+        role:
+          check.user.role ||
+          (String(check.user.email || "").toLowerCase().includes("admin") ? "admin" : "customer"),
       });
       navigation.goBack();
     } catch (e) {
-      Alert.alert("Invalid code", e.message);
+      setLoginError(e?.message || "Invalid email or password.");
     } finally {
       setLoading(false);
     }
@@ -77,65 +67,57 @@ export function LoginScreen({ navigation }) {
         ) : null}
 
         <View style={[styles.card, isWide ? styles.cardWide : null]}>
-          {step === 1 ? (
-            <>
-              <Text style={styles.label}>Email</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="you@example.com"
-                value={email}
-                onChangeText={setEmail}
-                autoCapitalize="none"
-                keyboardType="email-address"
-              />
+          <Text style={styles.label}>Email</Text>
+          <View style={styles.fieldWrap}>
+            <TextInput
+              style={styles.input}
+              value={email}
+              onChangeText={setEmail}
+              autoCapitalize="none"
+              autoCorrect={false}
+              keyboardType="email-address"
+            />
+            {!email ? (
+              <Text style={styles.fieldPlaceholder} pointerEvents="none">
+                you@example.com
+              </Text>
+            ) : null}
+          </View>
 
-              <Text style={styles.label}>Password</Text>
-              <View style={styles.passwordWrap}>
-                <TextInput
-                  style={styles.passwordInput}
-                  placeholder="Your password"
-                  value={password}
-                  onChangeText={setPassword}
-                  secureTextEntry={!showPassword}
-                />
-                <Pressable style={styles.showBtn} onPress={() => setShowPassword((prev) => !prev)}>
-                  <Text style={styles.showBtnText}>{showPassword ? "Hide" : "Show"}</Text>
-                </Pressable>
-              </View>
+          <Text style={styles.label}>Password</Text>
+          <View style={styles.passwordWrap}>
+            <TextInput
+              style={styles.passwordInput}
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry={!showPassword}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            {!password ? (
+              <Text style={[styles.fieldPlaceholder, styles.passwordPlaceholder]} pointerEvents="none">
+                Your password
+              </Text>
+            ) : null}
+            <Pressable style={styles.showBtn} onPress={() => setShowPassword((prev) => !prev)}>
+              <Text style={styles.showBtnText}>{showPassword ? "Hide" : "Show"}</Text>
+            </Pressable>
+          </View>
 
-              <Pressable style={styles.forgotBtn} onPress={() => navigation.navigate("ForgotPassword")}>
-                <Text style={styles.forgotText}>
-                  Forgot your password? <Text style={styles.linkInline}>Reset it</Text>
-                </Text>
-              </Pressable>
-
-              <Pressable style={styles.btn} onPress={onSendOtp} disabled={loading}>
-                <Text style={styles.btnText}>{loading ? "Sending code..." : "LOG IN"}</Text>
-              </Pressable>
-
-              <Pressable style={styles.signupBtn} onPress={() => navigation.navigate("Signup")}>
-                <Text style={styles.signupText}>
-                  New to JCE Bridal? <Text style={styles.linkInline}>Create an account</Text>
-                </Text>
-              </Pressable>
-            </>
-          ) : (
-            <>
-              <Text style={styles.label}>OTP</Text>
-              <Text style={styles.note}>Enter the 6-digit verification code sent to {email}.</Text>
-              <TextInput
-                style={styles.input}
-                placeholder="000000"
-                value={otp}
-                onChangeText={(v) => setOtp(v.replace(/\D/g, ""))}
-                maxLength={6}
-                keyboardType="number-pad"
-              />
-              <Pressable style={styles.btn} onPress={onVerify} disabled={loading}>
-                <Text style={styles.btnText}>{loading ? "Verifying..." : "VERIFY AND SIGN IN"}</Text>
-              </Pressable>
-            </>
-          )}
+          <Pressable style={styles.forgotBtn} onPress={() => navigation.navigate("ForgotPassword")}> 
+            <Text style={styles.forgotText}>
+              Forgot your password? <Text style={styles.linkInline}>Reset it</Text>
+            </Text>
+          </Pressable>
+          {loginError ? <Text style={styles.errorText}>{loginError}</Text> : null}
+          <Pressable style={styles.btn} onPress={onLogin} disabled={loading}>
+            <Text style={styles.btnText}>{loading ? "Signing in…" : "LOG IN"}</Text>
+          </Pressable>
+          <Pressable style={styles.signupBtn} onPress={() => navigation.navigate("Signup")}> 
+            <Text style={styles.signupText}>
+              New to JCE Bridal? <Text style={styles.linkInline}>Create an account</Text>
+            </Text>
+          </Pressable>
         </View>
       </View>
 
@@ -153,7 +135,13 @@ export function LoginScreen({ navigation }) {
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: "#f7f3f6", paddingHorizontal: 12, paddingTop: 20 },
   topSection: { paddingBottom: 18 },
-  topSectionWide: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", paddingHorizontal: 24, paddingTop: 24 },
+  topSectionWide: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    paddingHorizontal: 24,
+    paddingTop: 24,
+  },
   mobileHero: { marginTop: 6, marginBottom: 8, paddingHorizontal: 2 },
   heroBlock: { width: "52%", paddingTop: 8 },
   heroTag: { color: "#c7c1c8", fontSize: 12, letterSpacing: 1.2, marginBottom: 10 },
@@ -170,21 +158,63 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   cardWide: { width: 420, marginTop: 0 },
-  label: { textTransform: "uppercase", fontSize: 12, letterSpacing: 2, color: "#2f4d63", marginBottom: 8, marginTop: 4 },
-  input: { borderWidth: 1, borderColor: "#d7d1ca", paddingVertical: 11, paddingHorizontal: 12, marginBottom: 14, backgroundColor: brand.white, color: brand.text },
-  passwordWrap: { borderWidth: 1, borderColor: "#d7d1ca", backgroundColor: brand.white, flexDirection: "row", alignItems: "center", marginBottom: 14 },
+  label: {
+    textTransform: "uppercase",
+    fontSize: 12,
+    letterSpacing: 2,
+    color: "#2f4d63",
+    marginBottom: 8,
+    marginTop: 4,
+  },
+  input: {
+    borderWidth: 1,
+    borderColor: "#d7d1ca",
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    backgroundColor: brand.white,
+    color: brand.text,
+  },
+  fieldWrap: {
+    position: "relative",
+    marginBottom: 14,
+  },
+  fieldPlaceholder: {
+    position: "absolute",
+    left: 12,
+    top: 11,
+    color: brand.placeholder,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  passwordPlaceholder: { right: 56 },
+  passwordWrap: {
+    position: "relative",
+    borderWidth: 1,
+    borderColor: "#d7d1ca",
+    backgroundColor: brand.white,
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 14,
+  },
   passwordInput: { flex: 1, paddingVertical: 11, paddingHorizontal: 12, color: brand.text },
   showBtn: { paddingHorizontal: 14, paddingVertical: 8 },
   showBtnText: { textTransform: "uppercase", fontSize: 12, letterSpacing: 1.1, color: "#2f4d63" },
   forgotBtn: { marginBottom: 10 },
   forgotText: { color: "#4e5b66", fontSize: 12 },
+  errorText: { color: "#c42121", fontSize: 12, marginBottom: 12, lineHeight: 18 },
   linkInline: { textDecorationLine: "underline" },
   btn: { backgroundColor: "#111317", paddingVertical: 13, marginBottom: 14 },
   btnText: { color: brand.white, textAlign: "center", fontWeight: "800", letterSpacing: 1.3, fontSize: 11 },
   signupBtn: { marginBottom: 2 },
   signupText: { color: "#4e5b66", fontSize: 12 },
-  note: { color: brand.textLight, marginBottom: 8, fontSize: 12 },
-  footer: { marginTop: "auto", backgroundColor: "#e9e4de", alignItems: "center", justifyContent: "center", paddingVertical: 36, gap: 8 },
+  footer: {
+    marginTop: "auto",
+    backgroundColor: "#e9e4de",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 36,
+    gap: 8,
+  },
   footerBrand: { color: "#1f1f22", fontSize: 38, fontWeight: "500" },
   footerLinks: { color: "#1f1f22", fontSize: 11, letterSpacing: 0.8 },
   footerCopyright: { color: "#5f5d61", fontSize: 10 },

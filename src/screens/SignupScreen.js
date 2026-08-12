@@ -1,9 +1,9 @@
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
-import { useMemo, useState } from "react";
-import { sendLoginOtp, verifyLoginOtp } from "../services/auth";
+import { useMemo, useState, useRef, useEffect } from "react";
+import { verifyLoginOtp, sendOtpRemote } from "../services/auth";
 import { useShop } from "../context/ShopContext";
-import { registerUser } from "../services/authLocal";
-import { getPasswordRuleChecks } from "../utils/authValidation";
+import { checkEmailTaken, getUserByEmail, registerUser } from "../services/authLocal";
+import { getPasswordRuleChecks, validateSignupForm } from "../utils/authValidation";
 import { brand } from "../theme/brand";
 
 export function SignupScreen({ navigation }) {
@@ -13,6 +13,10 @@ export function SignupScreen({ navigation }) {
   const [otp, setOtp] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [emailTaken, setEmailTaken] = useState(false);
+  const [emailTakenMessage, setEmailTakenMessage] = useState("");
+  const [emailChecking, setEmailChecking] = useState(false);
+  const [registerError, setRegisterError] = useState("");
   const [form, setForm] = useState({
     firstName: "",
     lastName: "",
@@ -22,40 +26,158 @@ export function SignupScreen({ navigation }) {
   });
 
   const checks = useMemo(() => getPasswordRuleChecks(form.password), [form.password]);
-  const onChange = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  const formValidation = useMemo(
+    () => validateSignupForm(form),
+    [form.firstName, form.lastName, form.email, form.password, form.confirmPassword]
+  );
+  const canSubmit = formValidation.ok && !loading && !emailTaken && !emailChecking;
+  const onChange = (key, value) => {
+    if (registerError) setRegisterError("");
+    if (key === "email") {
+      setEmailTaken(false);
+      setEmailTakenMessage("");
+      setRegisterError("");
+      setEmailChecking(true);
+    }
+    setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  useEffect(() => {
+    let active = true;
+    const checkEmail = async () => {
+      const cleanEmail = String(form.email || "").trim();
+      if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        if (active) {
+          setEmailTaken(false);
+          setEmailChecking(false);
+        }
+        return;
+      }
+
+      if (active) setEmailChecking(true);
+      try {
+        const taken = await checkEmailTaken(cleanEmail);
+        if (active) {
+          setEmailTaken(Boolean(taken));
+          if (taken) {
+            setEmailTakenMessage("An account with this email already exists.");
+          } else {
+            setEmailTakenMessage("");
+          }
+          setRegisterError("");
+          setEmailChecking(false);
+        }
+      } catch {
+        if (active) {
+          setEmailChecking(false);
+          setEmailTaken(false);
+          setEmailTakenMessage("");
+        }
+      }
+    };
+    checkEmail();
+    return () => {
+      active = false;
+    };
+  }, [form.email]);
 
   const sendOtp = async () => {
-    if (form.password !== form.confirmPassword) {
-      Alert.alert("Invalid form", "Passwords do not match.");
+    if (!formValidation.ok) {
+      setRegisterError("Please complete all registration requirements first.");
       return;
     }
-    const fullName = `${String(form.firstName || "").trim()} ${String(form.lastName || "").trim()}`.trim();
-    if (!fullName) {
-      Alert.alert("Invalid form", "Please provide your first and last name.");
+
+    if (emailChecking) {
+      setRegisterError("Please wait while we confirm your email.");
       return;
     }
+
+    if (emailTaken) {
+      setRegisterError("An account with this email already exists.");
+      setStep(1);
+      return;
+    }
+
     setLoading(true);
     try {
-      const otpResult = await sendLoginOtp(form.email.trim());
-      Alert.alert("OTP (dev mode)", `Use this code: ${otpResult.otp}`);
+      const cleanEmail = String(form.email || "").trim();
+      const taken = await checkEmailTaken(cleanEmail);
+      if (taken) {
+        setEmailTaken(true);
+        setEmailTakenMessage("An account with this email already exists.");
+        setRegisterError("");
+        setStep(1);
+        return;
+      }
+
+      const otpResult = await sendOtpRemote(cleanEmail, "signup");
+      if (!otpResult.ok) {
+        const message = otpResult.error || "Failed to send verification code.";
+        if (message.toLowerCase().includes("already exists")) {
+          throw new Error("An account with this email already exists.");
+        }
+        if (message.toLowerCase().includes("network")) {
+          const existingUser = await getUserByEmail(cleanEmail);
+          if (existingUser) {
+            throw new Error("An account with this email already exists.");
+          }
+        }
+        throw new Error(message);
+      }
+      // backend may return a cooldown error as text in the error path; here
+      // we assume success means an email was sent. Start resend timer.
       setStep(2);
+      startResendCountdown(30);
+      Alert.alert("Verification sent", "A verification code has been sent to your email.");
     } catch (e) {
-      Alert.alert("Signup error", e.message);
+      Alert.alert("Signup error", e.message || "Failed to send verification code.");
     } finally {
       setLoading(false);
     }
   };
 
+  // Resend countdown state
+  const [resendSeconds, setResendSeconds] = useState(0);
+  const resendTimerRef = useRef(null);
+  function startResendCountdown(seconds) {
+    setResendSeconds(seconds);
+    if (resendTimerRef.current) clearInterval(resendTimerRef.current);
+    resendTimerRef.current = setInterval(() => {
+      setResendSeconds((s) => {
+        if (s <= 1) {
+          clearInterval(resendTimerRef.current);
+          resendTimerRef.current = null;
+          return 0;
+        }
+        return s - 1;
+      });
+    }, 1000);
+  }
+
+  useEffect(() => {
+    return () => {
+      if (resendTimerRef.current) clearInterval(resendTimerRef.current);
+    };
+  }, []);
+
   const verifyOtp = async () => {
     setLoading(true);
     try {
-      await verifyLoginOtp(form.email.trim(), otp.trim());
+      await verifyLoginOtp(form.email.trim(), otp.trim(), "signup");
+
       const result = await registerUser({
         name: `${String(form.firstName || "").trim()} ${String(form.lastName || "").trim()}`.trim(),
         email: form.email,
         password: form.password,
       });
-      if (!result.ok || !result.user) throw new Error(result.error || "Unable to create account.");
+
+      if (!result.ok || !result.user) {
+        setStep(1);
+        setOtp("");
+        setRegisterError(result.error || "Unable to create account.");
+        return;
+      }
+
       await login({
         id: result.user.id,
         name: result.user.name,
@@ -64,7 +186,7 @@ export function SignupScreen({ navigation }) {
       });
       navigation.goBack();
     } catch (e) {
-      Alert.alert("OTP error", e.message);
+      Alert.alert("OTP error", e.message || "Unable to verify code.");
     } finally {
       setLoading(false);
     }
@@ -108,6 +230,7 @@ export function SignupScreen({ navigation }) {
             autoCapitalize="none"
             keyboardType="email-address"
           />
+          {emailTaken ? <Text style={styles.errorText}>{emailTakenMessage}</Text> : null}
 
           <Text style={styles.label}>Password</Text>
           <View style={styles.inputWithAction}>
@@ -132,6 +255,9 @@ export function SignupScreen({ navigation }) {
           <Text style={[styles.rule, checks.number ? styles.ruleOk : styles.rulePending]}>
             {checks.number ? "✓" : "-"} At least one number
           </Text>
+          <Text style={[styles.rule, form.password && form.confirmPassword && form.password === form.confirmPassword ? styles.ruleOk : styles.rulePending]}>
+            {form.password && form.confirmPassword && form.password === form.confirmPassword ? "✓" : "-"} Passwords match
+          </Text>
 
           <Text style={[styles.label, styles.confirmLabel]}>Confirm Password</Text>
           <View style={styles.inputWithAction}>
@@ -148,7 +274,7 @@ export function SignupScreen({ navigation }) {
             </Pressable>
           </View>
 
-          <Pressable style={styles.btn} onPress={sendOtp} disabled={loading}>
+          <Pressable style={styles.btn} onPress={sendOtp} disabled={!canSubmit}>
             <Text style={styles.btnText}>{loading ? "Sending code..." : "Register"}</Text>
           </Pressable>
           <Text style={styles.bottomText}>
@@ -172,6 +298,27 @@ export function SignupScreen({ navigation }) {
           />
           <Pressable style={styles.btn} onPress={verifyOtp} disabled={loading}>
             <Text style={styles.btnText}>{loading ? "Verifying..." : "Verify and Create Account"}</Text>
+          </Pressable>
+          <View style={{ marginTop: 10 }} />
+          <Pressable
+            style={[styles.btn, { backgroundColor: resendSeconds ? '#DDD' : brand.button }]}
+            onPress={async () => {
+              if (resendSeconds) return;
+              setLoading(true);
+              try {
+                const r = await sendOtpRemote(form.email.trim(), 'signup');
+                if (!r.ok) throw new Error(r.error || 'Unable to resend code.');
+                startResendCountdown(30);
+                Alert.alert('Verification sent', 'A new code has been sent to your email.');
+              } catch (e) {
+                Alert.alert('Resend failed', e.message || 'Unable to resend code.');
+              } finally {
+                setLoading(false);
+              }
+            }}
+            disabled={Boolean(resendSeconds)}
+          >
+            <Text style={styles.btnText}>{resendSeconds ? `Resend in ${resendSeconds}s` : 'Resend code'}</Text>
           </Pressable>
         </View>
       )}
@@ -213,6 +360,9 @@ const styles = StyleSheet.create({
   ruleOk: { color: "#2E7D32", fontWeight: "700" },
   rulePending: { color: "#4A5A6D" },
   confirmLabel: { marginTop: 14 },
+  errorText: { color: "#c42121", fontSize: 13, marginTop: 8, lineHeight: 18 },
+  validationSummary: { marginTop: 12, paddingHorizontal: 4 },
+  validationTitle: { color: "#35495F", fontSize: 12, fontWeight: "700", letterSpacing: 1.2, marginBottom: 4, textTransform: "uppercase" },
   note: { color: "#4A5A6D", marginBottom: 10, fontSize: 14, lineHeight: 20 },
   btn: { marginTop: 14, backgroundColor: brand.button, paddingVertical: 14 },
   btnText: { color: brand.white, textAlign: "center", fontWeight: "800", letterSpacing: 1.6, fontSize: 12, textTransform: "uppercase" },

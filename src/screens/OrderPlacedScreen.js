@@ -206,17 +206,24 @@ export function OrderPlacedScreen({ route, navigation }) {
   }
 
   const hasSubmittedProof = Boolean(order?.paymentProof?.imageUri || order?.paymentProofStatus === "pending");
-  const methodLabel = paymentMethod === "bdo" ? "BDO" : "GCash";
+  const methodLabel = paymentMethod === "bdo" ? "BDO" : paymentMethod === "qrph" ? "QR Ph" : "GCash";
   const verdictStyle = imgVerdict ? verdictStyles(imgVerdict) : null;
   const imageReady = Boolean(proofUploadUri) || overridden;
   const canSubmitProof =
     !submittingProof && !verifying && refValid && (imageReady || Boolean(String(referenceNumber || "").trim()));
-  const showProofUpload = paymentMethod !== "cash" && !hasSubmittedProof;
+  const isQrPhPaid = paymentMethod === "qrph" && String(order?.paymentStatus || "").toLowerCase() === "paid";
+  const showProofUpload = paymentMethod !== "cash" && paymentMethod !== "qrph" && !hasSubmittedProof;
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <OrderConfirmationHero order={order} userFirstName={user?.firstName || user?.name} />
       <WhatHappensNextCard order={order} />
+      {isQrPhPaid ? (
+        <View style={styles.qrPaidBanner}>
+          <Text style={styles.qrPaidTitle}>✓ Payment verified via PayMongo</Text>
+          <Text style={styles.qrPaidSub}>Your payment was confirmed automatically — no proof needed.</Text>
+        </View>
+      ) : null}
       {hasSubmittedProof ? <ProofStatusBanner order={order} /> : null}
 
       {showProofUpload ? (
@@ -353,6 +360,17 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: brand.bg },
   content: { padding: 16, paddingBottom: 28, gap: 12 },
   center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: brand.bg, padding: 16 },
+  meta: { color: brand.textLight, textAlign: "center" },
+  qrPaidBanner: {
+    borderWidth: 1,
+    borderColor: "#155724",
+    borderLeftWidth: 3,
+    backgroundColor: "#f0faf3",
+    borderRadius: 10,
+    padding: 12,
+  },
+  qrPaidTitle: { color: "#155724", fontWeight: "800", fontSize: 14, marginBottom: 4 },
+  qrPaidSub: { color: "#2c6e3f", fontSize: 12, lineHeight: 18 },
   hero: { backgroundColor: brand.dark, padding: 16, borderRadius: 12 },
   heroTitle: { color: brand.white, fontSize: 34, fontWeight: "700", fontStyle: "italic" },
   heroSub: { color: "#ddd2d8", marginTop: 4, marginBottom: 12, fontSize: 12 },
