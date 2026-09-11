@@ -86,11 +86,11 @@ export function FittingProvider({ children }) {
         ...p,
         ...(m
           ? {
-              bust: m.bust_cm ?? p.bust,
-              waist: m.waist_cm ?? p.waist,
-              hips: m.hips_cm ?? p.hips,
-              height: m.height_cm ?? p.height,
-              weight: m.weight_kg ?? p.weight,
+              bust: m.bust_cm ?? m.bust ?? p.bust,
+              waist: m.waist_cm ?? m.waist ?? p.waist,
+              hips: m.hips_cm ?? m.hips ?? p.hips,
+              height: m.height_cm ?? m.height ?? p.height,
+              weight: m.weight_kg ?? m.weight ?? p.weight,
               source: m.source ?? p.source,
             }
           : {}),
@@ -142,21 +142,21 @@ export function FittingProvider({ children }) {
     [profile.height, profile.skinTone, profile.undertone, profile.weight, updateProfile]
   );
 
-  const saveProfile = useCallback(async () => {
+  const saveProfile = useCallback(async (profileOverride = profile) => {
     if (!user?.id) return { ok: false, error: "Sign in to save your fitting profile." };
     setSaving(true);
     setSaveMsg("");
     try {
       await Promise.all([
         saveMeasurements(user.id, {
-          bust_cm: profile.bust,
-          waist_cm: profile.waist,
-          hips_cm: profile.hips,
-          height_cm: profile.height,
-          weight_kg: profile.weight,
-          source: profile.source || "manual",
+          bust_cm: profileOverride.bust,
+          waist_cm: profileOverride.waist,
+          hips_cm: profileOverride.hips,
+          height_cm: profileOverride.height,
+          weight_kg: profileOverride.weight,
+          source: profileOverride.source || "manual",
         }),
-        saveStylePreferences(user.id, profile),
+        saveStylePreferences(user.id, profileOverride),
       ]);
       setSaveMsg("✓ Profile saved");
       return { ok: true };

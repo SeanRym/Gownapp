@@ -153,6 +153,7 @@ export function createFittingScanSession() {
   let goodFrames = 0;
   const shapeVotes = {};
   let torsoHPx = null;
+  let lastPxPerCm = null;
   let detectedShape = null;
 
   function reset() {
@@ -162,6 +163,7 @@ export function createFittingScanSession() {
     goodFrames = 0;
     Object.keys(shapeVotes).forEach((k) => delete shapeVotes[k]);
     torsoHPx = null;
+    lastPxPerCm = null;
     detectedShape = null;
   }
 
@@ -223,6 +225,7 @@ export function createFittingScanSession() {
     }
 
     torsoHPx = torsoH;
+    lastPxPerCm = pxPerCm;
     const prevMean =
       pxPerCmHist.length > 0
         ? pxPerCmHist.reduce((a, b) => a + b, 0) / pxPerCmHist.length
@@ -284,7 +287,7 @@ export function createFittingScanSession() {
     const estSwPx = iqm(swHist);
     const estHipPx = iqm(hipHist) || estSwPx * 1.05;
     const torsoAnchor = getTorsoAnchor(profile.segment, profile.height, detectedShape);
-    const pxPerCm = torsoHPx > 0 ? torsoHPx / torsoAnchor : 1;
+    const pxPerCm = lastPxPerCm || (torsoHPx > 0 ? torsoHPx / torsoAnchor : 1);
     const mults = getMults(profile.segment, detectedShape);
     return {
       bust: Math.round((estSwPx / pxPerCm) * mults.bust),

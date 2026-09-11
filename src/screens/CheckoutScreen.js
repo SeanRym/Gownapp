@@ -2,6 +2,7 @@ import { Alert, ActivityIndicator, Image, Modal, Pressable, ScrollView, StyleShe
 import { useEffect, useMemo, useState } from "react";
 import { MaterialCommunityIcons } from "@expo/vector-icons";
 import { useShop } from "../context/ShopContext";
+import { updateUserProfile } from "../services/authLocal";
 import { submitOrder } from "../services/orders";
 import { createPaymongoQr, pollPaymongoPayment, switchOrderPaymentMethod } from "../services/payments";
 import { calculateShipping } from "../services/shipping";
@@ -210,23 +211,33 @@ export function CheckoutScreen({ navigation, route }) {
       if (!cleanEmail) return;
       const profiles = await loadCheckoutProfiles();
       const saved = profiles?.[cleanEmail];
-      if (!mounted || !saved) return;
-      setForm((prev) => ({
-        ...prev,
+      const splitName = (name) => {
+        const raw = String(name || "").trim();
+        if (!raw) return { firstName: "", lastName: "" };
+        const parts = raw.split(/\s+/).filter(Boolean);
+        return {
+          firstName: parts[0] || "",
+          lastName: parts.slice(1).join(" ") || "",
+        };
+      };
+      const fallbackName = splitName(user?.name || saved?.firstName ? `${saved?.firstName || ""} ${saved?.lastName || ""}`.trim() : "");
+      const next = {
         email: cleanEmail,
-        firstName: String(saved.firstName || prev.firstName || ""),
-        lastName: String(saved.lastName || prev.lastName || ""),
-        phone: String(saved.phone || prev.phone || ""),
-        address: String(saved.address || prev.address || ""),
-        city: String(saved.city || prev.city || ""),
-        province: String(saved.province || prev.province || ""),
-        zip: String(saved.zip || prev.zip || ""),
-      }));
+        firstName: String(saved?.firstName || user?.firstName || fallbackName.firstName || ""),
+        lastName: String(saved?.lastName || user?.lastName || fallbackName.lastName || ""),
+        phone: String(saved?.phone || user?.phone || user?.phoneNumber || ""),
+        address: String(saved?.address || user?.address || ""),
+        city: String(saved?.city || user?.city || ""),
+        province: String(saved?.province || user?.province || ""),
+        zip: String(saved?.zip || user?.zip || ""),
+      };
+      if (!mounted) return;
+      setForm((prev) => ({ ...prev, ...next }));
     })();
     return () => {
       mounted = false;
     };
-  }, [user?.email]);
+  }, [user?.email, user?.name, user?.firstName, user?.lastName, user?.phone, user?.phoneNumber, user?.address, user?.city, user?.province, user?.zip]);
 
   const validateReviewStep = () => {
     if (checkoutItems.length === 0) {
@@ -371,6 +382,19 @@ export function CheckoutScreen({ navigation, route }) {
             zip: String(form.zip || "").trim(),
           },
         });
+        const profileUpdate = await updateUserProfile({
+          id: user?.id,
+          email: cleanEmail,
+          name: `${String(form.firstName || "").trim()} ${String(form.lastName || "").trim()}`.trim() || user?.name,
+          phone: String(form.phone || "").trim(),
+          address: String(form.address || "").trim(),
+          city: String(form.city || "").trim(),
+          province: String(form.province || "").trim(),
+          zip: String(form.zip || "").trim(),
+        });
+        if (!profileUpdate?.ok) {
+          throw new Error(profileUpdate?.error || "Unable to sync delivery address to your profile.");
+        }
       }
       const response = await submitOrder({
         userId: user?.id,

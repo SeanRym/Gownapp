@@ -5,6 +5,8 @@ node_modules/
 
 # Expo
 .expo/
+.expo-export-temp/
+.tmp-export/
 dist/
 web-build/
 expo-env.d.ts
@@ -44,6 +46,7 @@ yarn-error.*
 .idea/
 
 # Build directories
+.gradle/
 android/build/
 packages/*/android/build/
 packages/*/ios/build/

@@ -2,6 +2,8 @@ import { useCallback, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
+import * as FileSystem from "expo-file-system";
+import * as FileSystemLegacy from "expo-file-system/legacy";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { useShop } from "../context/ShopContext";
@@ -89,6 +91,40 @@ function inDateRange(order, rangeKey) {
   if (from && d < from) return false;
   if (to && d > to) return false;
   return true;
+}
+
+function escapeCsvCell(value) {
+  const text = String(value ?? "");
+  if (/[",\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
+function getWritableCsvDirectory() {
+  const preferred =
+    FileSystemLegacy.documentDirectory ||
+    FileSystem.documentDirectory ||
+    FileSystemLegacy.cacheDirectory ||
+    FileSystem.cacheDirectory ||
+    "";
+
+  if (typeof preferred === "string" && preferred.trim()) {
+    return preferred.replace(/\/+$/, "") + "/";
+  }
+
+  return "file:///";
+}
+
+async function writeCsvFile(fileUri, csvText) {
+  const encoding = FileSystemLegacy.EncodingType?.UTF8 ?? "utf8";
+  const dir = fileUri.includes("/") ? fileUri.slice(0, fileUri.lastIndexOf("/")) : fileUri;
+  try {
+    await FileSystemLegacy.makeDirectoryAsync(dir, { intermediates: true });
+  } catch {
+    // Directory already exists or is not writable in this environment.
+  }
+  return FileSystemLegacy.writeAsStringAsync(fileUri, csvText, { encoding });
 }
 
 export function AdminStatsScreen() {
@@ -297,6 +333,73 @@ export function AdminStatsScreen() {
   const topQtyBase = Math.max(1, ...(stats.topByQty || []).map((x) => Number(x?.qty) || 0));
   const reportOrders = useMemo(() => orders.filter((o) => inDateRange(o, dateRangeKey)), [orders, dateRangeKey]);
 
+  const onExportCsv = useCallback(async () => {
+    if (!reportOrders.length) {
+      Alert.alert("No data", "No orders found in the selected date range.");
+      return;
+    }
+
+    const headers = [
+      "Order ID",
+      "Date",
+      "Customer Name",
+      "Email",
+      "Status",
+      "Payment",
+      "Order Total",
+      "Item",
+      "Size",
+      "Qty",
+      "Unit Price",
+      "Line Total",
+    ];
+
+    const rows = [headers];
+    for (const order of reportOrders) {
+      const customerName = `${order?.contact?.firstName || ""} ${order?.contact?.lastName || ""}`.trim() || "-";
+      const date = parseOrderDate(order)?.toISOString().slice(0, 10) || "-";
+      const orderTotal = Number(getOrderTotal(order)).toFixed(2);
+      const items = Array.isArray(order?.items) && order.items.length ? order.items : [{ name: "-", size: "-", qty: 0, subtotal: 0 }];
+
+      for (const item of items) {
+        const qty = Number(item?.qty) || 0;
+        const subtotal = Number(item?.subtotal) || 0;
+        const unitPrice = qty > 0 ? subtotal / qty : 0;
+        rows.push([
+          order?.id ?? "",
+          date,
+          customerName,
+          order?.contact?.email || "",
+          normalizeStatus(order?.status),
+          String(order?.payment || "").toUpperCase(),
+          orderTotal,
+          item?.name || "-",
+          item?.size || "-",
+          qty,
+          unitPrice.toFixed(2),
+          subtotal.toFixed(2),
+        ]);
+      }
+    }
+
+    const csvText = rows.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
+    const fileName = `jce_sales_report_${dateRangeKey}_${Date.now()}.csv`;
+    const baseDir = getWritableCsvDirectory();
+    const fileUri = `${baseDir}${fileName}`;
+
+    try {
+      await writeCsvFile(fileUri, csvText);
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(fileUri, { mimeType: "text/csv", dialogTitle: "Sales report CSV" });
+        return;
+      }
+      Alert.alert("CSV generated", `Saved to: ${fileUri}`);
+    } catch (e) {
+      Alert.alert("CSV export failed", e?.message || "Unable to generate CSV export.");
+    }
+  }, [dateRangeKey, reportOrders]);
+
   const onExportPdf = useCallback(async () => {
     const rangeCfg = getDateRangeConfig(dateRangeKey);
     if (!reportOrders.length) {
@@ -459,7 +562,7 @@ th{background:#11152e;color:#f0d49f}
           ))}
         </View>
         <View style={styles.exportRow}>
-          <Pressable style={styles.exportBtn} onPress={() => Alert.alert("Export CSV", "CSV export is not enabled yet.")}>
+          <Pressable style={styles.exportBtn} onPress={onExportCsv}>
             <Ionicons name="download-outline" size={14} color={brand.dark} />
             <Text style={styles.exportBtnText}>Download CSV</Text>
           </Pressable>

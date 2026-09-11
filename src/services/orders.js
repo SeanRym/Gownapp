@@ -40,6 +40,14 @@ function parseAmount(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function firstTruthy(...values) {
+  for (const value of values) {
+    const text = String(value ?? "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
 async function requestJson(path, options = {}) {
   const url = makeUrl(path);
   // Add cache-control headers to ensure fresh data from server
@@ -106,13 +114,40 @@ function mapOrderForMobile(order) {
   const lastName = String(order?.contact?.lastName || parts.slice(1).join(" ") || "").trim();
   // Match web admin: only `proofStatus === 'pending'` counts as "proofs to review".
   // Do not default null/empty to pending — that inflated counts vs /admin/orders.
-  const rawProofStatus = order?.proofStatus ?? order?.paymentProofStatus;
-  const paymentProofStatus =
-    rawProofStatus == null || rawProofStatus === ""
-      ? ""
-      : String(rawProofStatus).trim().toLowerCase();
-  const paymentProofImage =
-    String(order?.proofImageUrl || order?.paymentProof?.imageUri || "").trim() || "";
+  const rawProofStatus = firstTruthy(
+    order?.proofStatus,
+    order?.paymentProofStatus,
+    order?.paymentProof?.status,
+    order?.proof?.status,
+    order?.proofStatus
+  );
+  const paymentProofStatus = rawProofStatus ? String(rawProofStatus).trim().toLowerCase() : "";
+  const paymentProofImage = firstTruthy(
+    order?.proofImageUrl,
+    order?.proofImage,
+    order?.paymentProof?.imageUri,
+    order?.paymentProof?.imageUrl,
+    order?.paymentProof?.url,
+    order?.paymentProof?.image,
+    order?.proof?.imageUrl,
+    order?.proof?.image,
+    order?.proof?.url
+  );
+  const paymentProofReference = firstTruthy(
+    order?.proofReferenceNo,
+    order?.proofReferenceNumber,
+    order?.paymentProof?.referenceNumber,
+    order?.paymentProof?.referenceNo,
+    order?.proof?.referenceNo,
+    order?.proof?.referenceNumber
+  );
+  const paymentProofSubmittedAt = firstTruthy(
+    order?.proofUploadedAt,
+    order?.paymentProof?.submittedAt,
+    order?.paymentProof?.uploadedAt,
+    order?.proof?.submittedAt,
+    order?.proof?.uploadedAt
+  );
 
   const rawItems = Array.isArray(order?.items) ? order.items : [];
   const items = rawItems.map((it, index) => {
@@ -159,8 +194,8 @@ function mapOrderForMobile(order) {
     proofStatus: paymentProofStatus,
     paymentProof: {
       imageUri: paymentProofImage,
-      referenceNumber: String(order?.proofReferenceNo || order?.paymentProof?.referenceNumber || "").trim(),
-      submittedAt: order?.proofUploadedAt || order?.paymentProof?.submittedAt || null,
+      referenceNumber: paymentProofReference,
+      submittedAt: paymentProofSubmittedAt || null,
     },
     contact: {
       firstName,

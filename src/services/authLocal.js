@@ -58,6 +58,41 @@ export async function loadUsers() {
   }
 }
 
+async function upsertLocalUserRecord(user) {
+  const users = await loadUsers();
+  const email = normalizeEmail(user?.email);
+  const id = user?.id != null ? String(user.id) : "";
+  const nextUser = {
+    id: id || String(Date.now()),
+    name: String(user?.name || user?.firstName || "Customer").trim() || "Customer",
+    email: email || "",
+    phone: String(user?.phone || "").trim(),
+    role: normalizeRole(user?.role),
+    address: String(user?.address || "").trim(),
+    city: String(user?.city || "").trim(),
+    province: String(user?.province || "").trim(),
+    zip: String(user?.zip || "").trim(),
+  };
+
+  if (!nextUser.email && !nextUser.id) return users;
+
+  const index = users.findIndex((item) => {
+    const sameEmail = email && normalizeEmail(item?.email) === email;
+    const sameId = id && String(item?.id) === id;
+    return sameEmail || sameId;
+  });
+
+  const nextUsers = [...users];
+  if (index >= 0) {
+    nextUsers[index] = { ...nextUsers[index], ...nextUser, id: nextUsers[index]?.id || nextUser.id };
+  } else {
+    nextUsers.push(nextUser);
+  }
+
+  await saveUsers(nextUsers);
+  return nextUsers;
+}
+
 export async function checkEmailTaken(email) {
   const cleanEmail = normalizeEmail(email);
   if (!cleanEmail) return false;
@@ -207,15 +242,14 @@ export async function registerUser({ name, email, password }) {
     },
   });
   if (remote.ok && remote.data?.user) {
-    return {
-      ok: true,
-      user: {
-        id: remote.data.user.id,
-        name: remote.data.user.name,
-        email: remote.data.user.email,
-        role: normalizeRole(remote.data.user.role),
-      },
+    const user = {
+      id: remote.data.user.id,
+      name: remote.data.user.name,
+      email: remote.data.user.email,
+      role: normalizeRole(remote.data.user.role),
     };
+    await upsertLocalUserRecord(user);
+    return { ok: true, user };
   }
 
   if (!remote.networkError) {
@@ -252,15 +286,14 @@ export async function verifyLoginCredentials({ email, password }) {
   if (remote.ok && remote.data?.user) {
     delete attempts[cleanEmail];
     await saveLoginAttempts(attempts);
-    return {
-      ok: true,
-      user: {
-        id: remote.data.user.id,
-        name: remote.data.user.name,
-        email: remote.data.user.email,
-        role: normalizeRole(remote.data.user.role),
-      },
+    const user = {
+      id: remote.data.user.id,
+      name: remote.data.user.name,
+      email: remote.data.user.email,
+      role: normalizeRole(remote.data.user.role),
     };
+    await upsertLocalUserRecord(user);
+    return { ok: true, user };
   }
 
   if (!remote.networkError) {
@@ -321,38 +354,52 @@ export async function resetUserPassword({ email, password }) {
   return { ok: true, user: updated[index] };
 }
 
-export async function updateUserProfile({ id, email, name, phone }) {
+export async function updateUserProfile({ id, email, name, phone, address = "", city = "", province = "", zip = "" }) {
   const cleanId = id ? String(id).trim() : "";
   const cleanEmail = normalizeEmail(email);
   const cleanName = String(name || "").trim().replace(/\s+/g, " ");
   const cleanPhone = String(phone || "").trim();
+  const cleanAddress = String(address || "").trim();
+  const cleanCity = String(city || "").trim();
+  const cleanProvince = String(province || "").trim();
+  const cleanZip = String(zip || "").trim();
   if (!isRealName(cleanName)) {
     return { ok: false, error: "Please use a real name (letters/spaces/hyphen/apostrophe only)." };
   }
 
   const { firstName, lastName } = splitName(cleanName);
+  const buildUserPayload = (user) => ({
+    id: user?.id || cleanId || "",
+    name: user?.name || cleanName,
+    email: normalizeEmail(user?.email || cleanEmail),
+    phone: cleanPhone,
+    role: normalizeRole(user?.role),
+    address: cleanAddress || String(user?.address || "").trim(),
+    city: cleanCity || String(user?.city || "").trim(),
+    province: cleanProvince || String(user?.province || "").trim(),
+    zip: cleanZip || String(user?.zip || "").trim(),
+  });
+
+  const remoteBody = {
+    firstName,
+    lastName,
+    email: cleanEmail,
+    phone: cleanPhone,
+    address: cleanAddress,
+    city: cleanCity,
+    province: cleanProvince,
+    zip: cleanZip,
+  };
+
   if (cleanId) {
     const remote = await requestJson("/api/auth/update-profile", {
       method: "PATCH",
       includeAdminSecret: false,
       headers: { "x-user-id": cleanId },
-      body: {
-        firstName,
-        lastName,
-        email: cleanEmail,
-      },
+      body: remoteBody,
     });
     if (remote.ok && remote.data?.user) {
-      return {
-        ok: true,
-        user: {
-          id: remote.data.user.id,
-          name: remote.data.user.name,
-          email: remote.data.user.email,
-          phone: cleanPhone,
-          role: normalizeRole(remote.data.user.role),
-        },
-      };
+      return { ok: true, user: buildUserPayload(remote.data.user) };
     }
   }
 
@@ -362,33 +409,49 @@ export async function updateUserProfile({ id, email, name, phone }) {
       method: "PATCH",
       includeAdminSecret: false,
       headers: { "x-user-id": String(resolved.id) },
-      body: {
-        firstName,
-        lastName,
-        email: cleanEmail,
-      },
+      body: remoteBody,
     });
     if (remote.ok && remote.data?.user) {
-      return {
-        ok: true,
-        user: {
-          id: remote.data.user.id,
-          name: remote.data.user.name,
-          email: remote.data.user.email,
-          phone: cleanPhone,
-          role: normalizeRole(remote.data.user.role),
-        },
-      };
+      return { ok: true, user: buildUserPayload(remote.data.user) };
     }
   }
 
   const users = await loadUsers();
-  const index = users.findIndex((u) => normalizeEmail(u.email) === cleanEmail);
-  if (index < 0) return { ok: false, error: "No account found with this email." };
-  const updated = [...users];
-  updated[index] = { ...updated[index], name: cleanName, phone: cleanPhone };
-  await saveUsers(updated);
-  return { ok: true, user: updated[index] };
+  const index = users.findIndex((u) => normalizeEmail(u.email) === cleanEmail || (cleanId && String(u.id) === cleanId));
+  if (index >= 0) {
+    const updated = [...users];
+    updated[index] = {
+      ...updated[index],
+      id: updated[index]?.id || cleanId || Date.now(),
+      email: cleanEmail || updated[index]?.email,
+      name: cleanName,
+      phone: cleanPhone,
+      address: cleanAddress,
+      city: cleanCity,
+      province: cleanProvince,
+      zip: cleanZip,
+    };
+    await saveUsers(updated);
+    return { ok: true, user: updated[index] };
+  }
+
+  if (cleanEmail || cleanId) {
+    const created = {
+      id: cleanId || String(Date.now()),
+      name: cleanName,
+      email: cleanEmail,
+      phone: cleanPhone,
+      role: "customer",
+      address: cleanAddress,
+      city: cleanCity,
+      province: cleanProvince,
+      zip: cleanZip,
+    };
+    await saveUsers([...users, created]);
+    return { ok: true, user: created };
+  }
+
+  return { ok: false, error: "No account found with this email." };
 }
 
 export async function changeUserPassword({ id, email, currentPassword, nextPassword, otpVerified = false }) {
@@ -477,13 +540,20 @@ export async function listUsersAdmin() {
       lastName: u?.lastName || "",
       email: String(u?.email || ""),
       phone: String(u?.phone || ""),
+      address:
+        typeof u?.address === "string"
+          ? u.address
+          : [u?.address?.line1, u?.address?.city, u?.address?.province, u?.address?.postalCode]
+              .filter(Boolean)
+              .join(", ") || [u?.defaultAddress?.line1, u?.defaultAddress?.city, u?.defaultAddress?.province, u?.defaultAddress?.postalCode]
+              .filter(Boolean)
+              .join(", "),
       role: normalizeRole(u?.role),
       isActive: u?.isActive !== false,
-      createdAt: u?.createdAt || null,
+      createdAt: u?.createdAt || u?.created_at || null,
     }));
   }
-  const users = await loadUsers();
-  return (Array.isArray(users) ? users : []).map((u) => ({ ...u, role: normalizeRole(u?.role), isActive: true }));
+  return [];
 }
 
 function generateTemporaryPassword() {
@@ -512,10 +582,13 @@ export async function createUserAdmin({ firstName, lastName, name, email, passwo
   if (!inferredFirstName) {
     return { ok: false, error: "Please enter a first name." };
   }
+  if (!inferredLastName) {
+    return { ok: false, error: "Please enter a last name." };
+  }
   if (!isRealName(inferredFirstName)) {
     return { ok: false, error: "Please use a real first name." };
   }
-  if (inferredLastName && !isRealName(inferredLastName)) {
+  if (!isRealName(inferredLastName)) {
     return { ok: false, error: "Please use a real last name." };
   }
   if (!isValidEmail(cleanEmail)) return { ok: false, error: "Please enter a valid email." };
@@ -528,38 +601,49 @@ export async function createUserAdmin({ firstName, lastName, name, email, passwo
     body: {
       firstName: inferredFirstName,
       lastName: inferredLastName || "User",
+      name: finalName,
       email: cleanEmail,
       password: tempPassword,
       role: nextRole,
     },
   });
   if (remote.ok) {
+    const responseData = remote.data?.data || remote.data;
+    const createdUser = remote.data?.user || responseData?.user || remote.data?.createdUser || null;
+    const serverPassword = String(
+      remote.data?.temporaryPassword ||
+      remote.data?.tempPassword ||
+      remote.data?.temporary_password ||
+      remote.data?.temp_password ||
+      remote.data?.password ||
+      responseData?.temporaryPassword ||
+      responseData?.tempPassword ||
+      responseData?.temporary_password ||
+      responseData?.temp_password ||
+      responseData?.password ||
+      createdUser?.temporaryPassword ||
+      createdUser?.tempPassword ||
+      createdUser?.temporary_password ||
+      createdUser?.temp_password ||
+      tempPassword ||
+      ""
+    ).trim();
     return {
       ok: true,
+      password: serverPassword || tempPassword,
+      temporaryPassword: serverPassword || tempPassword,
       user: {
-        id: remote.data?.user?.id,
-        name: remote.data?.user?.name,
-        email: remote.data?.user?.email,
-        role: normalizeRole(remote.data?.user?.role),
-        isActive: remote.data?.user?.isActive !== false,
+        id: createdUser?.id || remote.data?.id,
+        name: createdUser?.name || createdUser?.fullName || finalName,
+        firstName: createdUser?.firstName || inferredFirstName,
+        lastName: createdUser?.lastName || inferredLastName,
+        email: createdUser?.email || cleanEmail,
+        role: normalizeRole(createdUser?.role || nextRole),
+        isActive: createdUser?.isActive !== false,
       },
     };
   }
-  const users = await loadUsers();
-  if (users.some((u) => normalizeEmail(u.email) === cleanEmail)) return { ok: false, error: "An account with this email already exists." };
-  const passwordHash = await sha256(tempPassword);
-  const user = {
-    id: Date.now(),
-    firstName: inferredFirstName,
-    lastName: inferredLastName || "User",
-    name: finalName,
-    email: cleanEmail,
-    passwordHash,
-    role: nextRole,
-    isActive: true,
-  };
-  await saveUsers([...users, user]);
-  return { ok: true, user };
+  return { ok: false, error: remote.error || "Unable to create user on the deployed server." };
 }
 
 export async function updateUserRoleAdmin({ id, email, role }) {
@@ -571,14 +655,9 @@ export async function updateUserRoleAdmin({ id, email, role }) {
       body: { id, role: nextRole },
     });
     if (remote.ok) return { ok: true, user: remote.data?.user };
+    return { ok: false, error: remote.error || "Unable to update user on the deployed server." };
   }
-  const users = await loadUsers();
-  const index = users.findIndex((u) => normalizeEmail(u.email) === cleanEmail);
-  if (index < 0) return { ok: false, error: "No account found with this email." };
-  const updated = [...users];
-  updated[index] = { ...updated[index], role: nextRole };
-  await saveUsers(updated);
-  return { ok: true, user: updated[index] };
+  return { ok: false, error: "A server user id is required to update this account." };
 }
 
 export async function deleteUserAdmin({ id, email }) {
@@ -589,13 +668,9 @@ export async function deleteUserAdmin({ id, email }) {
       headers: { "Content-Type": "application/json" },
     });
     if (remote.ok) return { ok: true };
+    return { ok: false, error: remote.error || "Unable to archive user on the deployed server." };
   }
-  const users = await loadUsers();
-  const index = users.findIndex((u) => normalizeEmail(u.email) === cleanEmail);
-  if (index < 0) return { ok: false, error: "No account found with this email." };
-  const updated = users.filter((u) => normalizeEmail(u.email) !== cleanEmail);
-  await saveUsers(updated);
-  return { ok: true };
+  return { ok: false, error: "A server user id is required to archive this account." };
 }
 
 export async function restoreUserAdmin({ id, email }) {
@@ -606,13 +681,7 @@ export async function restoreUserAdmin({ id, email }) {
       body: { id, isActive: true },
     });
     if (remote.ok) return { ok: true };
+    return { ok: false, error: remote.error || "Unable to restore user on the deployed server." };
   }
-
-  const users = await loadUsers();
-  const index = users.findIndex((u) => normalizeEmail(u.email) === cleanEmail);
-  if (index < 0) return { ok: false, error: "No account found with this email." };
-  const updated = [...users];
-  updated[index] = { ...updated[index], isActive: true };
-  await saveUsers(updated);
-  return { ok: true, user: updated[index] };
+  return { ok: false, error: "A server user id is required to restore this account." };
 }

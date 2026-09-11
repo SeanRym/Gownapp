@@ -151,6 +151,8 @@ function screenAlignmentScore(mapped) {
   const spanX = maxSx - minSx;
   if (spanX > 20) score += 1;
   if (Math.abs(midX - (lh.x + rh.x) / 2) < spanX * 0.35) score += 1;
+  // Do not treat the screen center as the primary alignment signal. The body should be
+  // tracked by shoulder/hip structure, not by a fixed center bias.
 
   return score;
 }
@@ -172,8 +174,8 @@ export function pickDisplayLandmarks(
   const tries =
     facing === "front"
       ? [
-          { mirrorX: false, lm: cloneLm(measureLm) },
           { mirrorX: true, lm: mirrorLandmarksX(measureLm) },
+          { mirrorX: false, lm: cloneLm(measureLm) },
         ]
       : [{ mirrorX: false, lm: cloneLm(measureLm) }];
 

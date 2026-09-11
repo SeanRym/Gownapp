@@ -1,44 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Animated, Image, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { CameraView, useCameraPermissions } from "expo-camera";
-import Constants, { ExecutionEnvironment } from "expo-constants";
+import { ActivityIndicator, Alert, Image, Pressable, ScrollView, StyleSheet, Text, View, Platform } from "react-native";
+import { useCameraPermissions } from "expo-camera";
 import * as MediaLibrary from "expo-media-library";
 import * as Sharing from "expo-sharing";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
-import { Ionicons } from "@expo/vector-icons";
 import { captureRef } from "react-native-view-shot";
-import { GownNativeSegmentationOverlay } from "../ar/GownNativeSegmentationOverlay";
-import { NativePoseCamera } from "../ar/NativePoseCamera";
-import { isNativeSegmentationAvailable } from "vision-camera-native-segmentation";
+import { MoveNetPoseCamera } from "../ar/MoveNetPoseCamera";
 import { GownFittedOverlay } from "../components/ar/GownFittedOverlay";
 import {
   analyzeTryonPose,
   getGownLayout,
-  landmarksToPixelKps,
+  getGownLayoutTryon,
   parseTryonCalibration,
   resolveTryonImageUri,
   smoothGownLayout,
 } from "../ar/gownLayout";
-import { parsePosePayload } from "../ar/posePluginToLandmarks";
-import { pickDisplayLandmarks } from "../utils/poseCoordinateTransform";
+import { tryonPayloadToPixelKps } from "../ar/tryonPoseMap";
 import { useShop } from "../context/ShopContext";
 import { saveTryonSnapshot } from "../services/fitting";
 import { brand } from "../theme/brand";
 import { filterGownsForProfile } from "../utils/gownSegmentFilter";
 import { idsEqual } from "../utils/id";
-import { loadArFitProfiles, saveArFitProfiles } from "../utils/storage";
 
-const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
-const canUseNativePose = Platform.OS !== "web" && !isExpoGo;
-const segmentationNativeLinked = isNativeSegmentationAvailable();
+const canUseNativePose = Platform.OS !== "web";
 
-const DEFAULT_FIT_MODEL = {
-  centerX: 0.5,
-  centerY: 0.48,
-  shoulderWidth: 0.24,
-  torsoHeight: 0.28,
-};
+// Pose lock: require N consecutive good frames before enabling capture.
+// This keeps the gown visible and stable, matching web deployed behavior.
+const LOCK_THRESHOLD = 8;  // ~0.27s at 30fps
 
+// Facing back direction smoothing: require N consecutive frames before switching.
+const FACING_THRESHOLD = 8; // ~0.27s at 30fps
+
+/**
+ * AR Try-On Screen — Exact web logic port
+ *
+ * Pose lock mechanism: gown stays visible once locked, doesn't disappear on tracking glitches.
+ * Facing back smoothing: sustained detection required before switching images.
+ */
 export function ARTryOnScreen({ route }) {
   const navigation = useNavigation();
   const { gowns, user } = useShop();
@@ -56,30 +54,35 @@ export function ARTryOnScreen({ route }) {
   const [cameraFacing, setCameraFacing] = useState("front");
   const initialId = route?.params?.id || null;
   const [selectedId, setSelectedId] = useState(initialId);
-  const [overlayScale, setOverlayScale] = useState(1);
-  const [overlayOpacity, setOverlayOpacity] = useState(0.72);
-  const [autoFitEnabled, setAutoFitEnabled] = useState(true);
-  const [poseDetected, setPoseDetected] = useState(false);
-  const [limbOcclusionEnabled, setLimbOcclusionEnabled] = useState(true);
-  const [nativeSegmentationEnabled, setNativeSegmentationEnabled] = useState(true);
-  const [nativeMaskUri, setNativeMaskUri] = useState(null);
-  const [fitModel, setFitModel] = useState(DEFAULT_FIT_MODEL);
-  const [profilesLoaded, setProfilesLoaded] = useState(false);
-  const [fitProfiles, setFitProfiles] = useState({});
   const [saving, setSaving] = useState(false);
   const [previewLayout, setPreviewLayout] = useState({ width: 320, height: 430 });
-  const [overlayLayout, setOverlayLayout] = useState({ width: 0, height: 0 });
   const [liveGownLayout, setLiveGownLayout] = useState(null);
-  const [tryonPoseOk, setTryonPoseOk] = useState(false);
+  const [poseLocked, setPoseLocked] = useState(false);    // replaces poseOk for stable capture gate
+  const [poseFound, setPoseFound] = useState(false);      // visual indicator
+  const [modelReady, setModelReady] = useState(false);
+  const [shouldersFound, setShouldersFound] = useState(false);
+  const [hipsFound, setHipsFound] = useState(false);
   const [tryonPoseIssues, setTryonPoseIssues] = useState([]);
-  const [landmarksForMask, setLandmarksForMask] = useState(null);
-  const overlayPan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
+  const [facingBack, setFacingBack] = useState(false);
+  const [timerSecs, setTimerSecs] = useState(0);
+  const [countdown, setCountdown] = useState(null);
+  const [capturePhotoUri, setCapturePhotoUri] = useState(null);
+  const countdownRef = useRef(null);
   const previewRef = useRef(null);
+  const cameraRef = useRef(null);
   const videoDimsRef = useRef({ width: 720, height: 1280 });
   const previewLayoutRef = useRef({ width: 320, height: 430 });
   const gownLayoutSmoothRef = useRef(null);
+  const lastGoodLayoutRef = useRef(null);
   const selectedGownRef = useRef(null);
-  const lastPoseAtRef = useRef(0);
+  const prevKpsRef = useRef(null);
+  const staleLayoutFramesRef = useRef(0);
+
+  // Pose lock tracking
+  const goodFramesRef = useRef(0);
+
+  // Facing back smoothing
+  const facingBackFramesRef = useRef(0);
 
   const selectedGown = useMemo(() => {
     const fallback = catalogGowns[0] || null;
@@ -89,177 +92,276 @@ export function ARTryOnScreen({ route }) {
   }, [catalogGowns, selectedId]);
 
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      const profiles = await loadArFitProfiles();
-      if (!mounted) return;
-      setFitProfiles(profiles || {});
-      setProfilesLoaded(true);
-    })();
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!profilesLoaded || !selectedGown) return;
-    const profile = fitProfiles?.[String(selectedGown.id)];
-    if (!profile) {
-      setFitModel(DEFAULT_FIT_MODEL);
-      return;
-    }
-    setFitModel({
-      centerX: Number(profile.centerX) || DEFAULT_FIT_MODEL.centerX,
-      centerY: Number(profile.centerY) || DEFAULT_FIT_MODEL.centerY,
-      shoulderWidth: Number(profile.shoulderWidth) || DEFAULT_FIT_MODEL.shoulderWidth,
-      torsoHeight: Number(profile.torsoHeight) || DEFAULT_FIT_MODEL.torsoHeight,
-    });
-  }, [profilesLoaded, selectedGown, fitProfiles]);
-
-  const onScaleDown = () => setOverlayScale((v) => Math.max(0.7, Number((v - 0.05).toFixed(2))));
-  const onScaleUp = () => setOverlayScale((v) => Math.min(1.4, Number((v + 0.05).toFixed(2))));
-  const onOpacityDown = () => setOverlayOpacity((v) => Math.max(0.35, Number((v - 0.05).toFixed(2))));
-  const onOpacityUp = () => setOverlayOpacity((v) => Math.min(0.95, Number((v + 0.05).toFixed(2))));
-
-  const adjustFit = (key, delta, min, max) => {
-    setFitModel((prev) => ({
-      ...prev,
-      [key]: Math.max(min, Math.min(max, Number((prev[key] + delta).toFixed(3)))),
-    }));
-  };
-
-  useEffect(() => {
     selectedGownRef.current = selectedGown;
+    if (selectedGown?.id) {
+      console.log("[AR] Gown selected:", {
+        id: selectedGown.id,
+        name: selectedGown.name,
+        hasImage: Boolean(selectedGown.image),
+        hasTryonImage: Boolean(selectedGown.tryonImage),
+        hasTryonImageBack: Boolean(selectedGown.tryonImageBack),
+      });
+    }
   }, [selectedGown]);
 
-  const tryonUri = useMemo(() => resolveTryonImageUri(selectedGown), [selectedGown]);
+  // When gown selection changes, reset pose lock
+  useEffect(() => {
+    goodFramesRef.current = 0;
+    setPoseLocked(false);
+    setPoseFound(false);
+    setShouldersFound(false);
+    setHipsFound(false);
+    setTryonPoseIssues([]);
+    facingBackFramesRef.current = 0;
+    setFacingBack(false);
+    prevKpsRef.current = null;
+    gownLayoutSmoothRef.current = null;
+    lastGoodLayoutRef.current = null;
+    staleLayoutFramesRef.current = 0;
+    setLiveGownLayout(null);
+  }, [selectedGown?.id]);
 
-  const useWebBodyFit =
-    autoFitEnabled && canUseNativePose && tryonPoseOk && liveGownLayout && Boolean(tryonUri);
+  const tryonUri = useMemo(() => resolveTryonImageUri(selectedGown, facingBack), [selectedGown, facingBack]);
+  const displayUri = tryonUri || selectedGown?.image || selectedGown?.tryonImage || "";
 
-  const showNativePersonMask =
-    !useWebBodyFit &&
-    segmentationNativeLinked &&
-    nativeSegmentationEnabled &&
-    nativeMaskUri &&
-    overlayLayout.width > 40 &&
-    overlayLayout.height > 40;
+  useEffect(() => {
+    if (selectedGown?.id && displayUri) {
+      console.log("[AR] Gown " + selectedGown.id + " loaded with image");
+    }
+  }, [selectedGown?.id, displayUri]);
+
+  useEffect(() => {
+    console.log("[AR] Selected gown:", selectedGown);
+    console.log("[AR] Try-on URL:", displayUri);
+  }, [selectedGown, displayUri]);
+
+  // Do not use a fixed centered fallback. The gown must follow the body by using the live
+  // shoulder/hip geometry. If that layout is missing, the overlay should not be rendered.
+  const overlayLayout = liveGownLayout ?? lastGoodLayoutRef.current ?? null;
+  const canCaptureGown = canUseNativePose && poseFound && Boolean(overlayLayout) && Boolean(displayUri);
+  const showGownOverlay = Boolean(displayUri) && !!overlayLayout && poseFound;
 
   const onVideoDimensions = useCallback((dims) => {
     if (dims?.width && dims?.height) videoDimsRef.current = dims;
   }, []);
 
-  const onSegmentationResult = useCallback((r) => {
-    if (!r || typeof r !== "object" || r.error) return;
-    if (r.maskBase64 && typeof r.maskBase64 === "string") {
-      setNativeMaskUri(`data:image/png;base64,${r.maskBase64}`);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!nativeSegmentationEnabled) setNativeMaskUri(null);
-  }, [nativeSegmentationEnabled]);
-
   const onPoseMap = useCallback(
     (payload) => {
-      if (!autoFitEnabled || !canUseNativePose) return;
-      if (payload?.error) return;
-      const parsed = parsePosePayload(payload, {
-        fallbackW: videoDimsRef.current.width,
-        fallbackH: videoDimsRef.current.height,
-      });
-      const pl = previewLayoutRef.current;
-      const landmarks =
-        parsed?.landmarks && pl.width > 0 && pl.height > 0
-          ? pickDisplayLandmarks(
-              parsed.landmarks,
-              pl.width,
-              pl.height,
-              parsed.imageWidth,
-              parsed.imageHeight,
-              cameraFacing,
-              "cover"
-            )
-          : null;
-      if (!landmarks) {
+      if (!canUseNativePose) return;
+
+      if (payload?.error) {
+        console.warn("[AR] MoveNet error:", payload.error);
         return;
       }
-      lastPoseAtRef.current = Date.now();
-      setPoseDetected(true);
-      const vw = pl.width || 320;
-      const vh = pl.height || 430;
-      const kps = landmarksToPixelKps(landmarks, vw, vh);
-      const analysis = analyzeTryonPose(kps, vw, vh);
+
+      const { width: vw, height: vh } = previewLayoutRef.current;
+      const kps = tryonPayloadToPixelKps(payload, vw, vh);
+      if (!kps?.leftShoulder || !kps?.rightShoulder) {
+        setShouldersFound(false);
+        setHipsFound(false);
+        return;
+      }
+
+      const shoulderCenterX = (kps.leftShoulder.x + kps.rightShoulder.x) / 2;
+      const shoulderCenterY = (kps.leftShoulder.y + kps.rightShoulder.y) / 2;
+      const previewCenterX = vw / 2;
+      console.log("[AR] Keypoints after transform:", {
+        shoulderCenter: { x: Math.round(shoulderCenterX), y: Math.round(shoulderCenterY) },
+        previewCenter: Math.round(previewCenterX),
+        distanceFromCenter: Math.round(Math.abs(shoulderCenterX - previewCenterX)),
+        ls: { x: Math.round(kps.leftShoulder.x), y: Math.round(kps.leftShoulder.y) },
+        rs: { x: Math.round(kps.rightShoulder.x), y: Math.round(kps.rightShoulder.y) },
+        lh: kps.leftHip
+          ? { x: Math.round(kps.leftHip.x), y: Math.round(kps.leftHip.y) }
+          : null,
+        rh: kps.rightHip
+          ? { x: Math.round(kps.rightHip.x), y: Math.round(kps.rightHip.y) }
+          : null,
+        previewDims: { vw, vh },
+        facing: cameraFacing,
+      });
+
+      // Smooth keypoints matching web version (lerp 0.35)
+      let smoothedKps = kps;
+      if (prevKpsRef.current) {
+        const t = 0.35;
+        const lerp = (a, b) => a + (b - a) * t;
+        const lerpKp = (curr, prev) => {
+          if (!curr || !prev) return curr;
+          return {
+            x: lerp(prev.x, curr.x),
+            y: lerp(prev.y, curr.y),
+            score: curr.score ?? 1,
+          };
+        };
+        smoothedKps = {
+          nose: lerpKp(kps.nose, prevKpsRef.current.nose),
+          leftShoulder: lerpKp(kps.leftShoulder, prevKpsRef.current.leftShoulder),
+          rightShoulder: lerpKp(kps.rightShoulder, prevKpsRef.current.rightShoulder),
+          leftHip: lerpKp(kps.leftHip, prevKpsRef.current.leftHip),
+          rightHip: lerpKp(kps.rightHip, prevKpsRef.current.rightHip),
+          leftKnee: lerpKp(kps.leftKnee, prevKpsRef.current.leftKnee),
+          rightKnee: lerpKp(kps.rightKnee, prevKpsRef.current.rightKnee),
+          leftAnkle: lerpKp(kps.leftAnkle, prevKpsRef.current.leftAnkle),
+          rightAnkle: lerpKp(kps.rightAnkle, prevKpsRef.current.rightAnkle),
+        };
+      }
+      prevKpsRef.current = smoothedKps;
+
+      const analysis = analyzeTryonPose(smoothedKps, vw, vh);
       setTryonPoseIssues(analysis.issues || []);
+      setShouldersFound(Boolean(analysis.shouldersOk));
+      setHipsFound(Boolean(analysis.hipsOk));
+
+      // Smooth back-facing transitions — require 8 consecutive frames (web logic)
+      const tooCloseFrame = analysis.issues.includes("too_close") && !analysis.facingBack;
+      if (tooCloseFrame) {
+        facingBackFramesRef.current = 0;
+      } else if (analysis.facingBack) {
+        facingBackFramesRef.current = Math.min(facingBackFramesRef.current + 1, 8);
+      } else {
+        facingBackFramesRef.current = Math.max(facingBackFramesRef.current - 1, 0);
+      }
+      const isBackFacing = facingBackFramesRef.current >= 8;
+      setFacingBack(isBackFacing);
 
       const cal = parseTryonCalibration(selectedGownRef.current?.tryonCalibration);
-      const layout = kps ? getGownLayout(kps, cal, vw, vh) : null;
+      const gownSilhouette = selectedGownRef.current?.silhouette || selectedGownRef.current?.type || "";
+      const strictLayout = getGownLayout(smoothedKps, { ...cal, silhouette: gownSilhouette }, vw, vh);
+      const layout = getGownLayoutTryon(smoothedKps, { ...cal, silhouette: gownSilhouette }, vw, vh);
 
-      if (layout && analysis.shouldersOk && analysis.hipsOk) {
-        gownLayoutSmoothRef.current = smoothGownLayout(gownLayoutSmoothRef.current, layout, 0.38);
+      const renderShouldersOk =
+        smoothedKps.leftShoulder?.score > 0.2 && smoothedKps.rightShoulder?.score > 0.2;
+      const hasBodyAnchors = Boolean(layout && renderShouldersOk);
+      const strictBodyLayout = Boolean(strictLayout && analysis.shouldersOk && analysis.hipsOk);
+      const isPrimaryGood = strictBodyLayout && analysis.issues.length === 0;
+      console.log(
+        "[AR] Pose analysis " +
+          JSON.stringify({
+            shouldersOk: analysis.shouldersOk,
+            hipsOk: analysis.hipsOk,
+            issues: analysis.issues,
+            layoutReady: Boolean(layout),
+            scores: {
+              leftShoulder: kps.leftShoulder?.score,
+              rightShoulder: kps.rightShoulder?.score,
+              leftHip: kps.leftHip?.score,
+              rightHip: kps.rightHip?.score,
+            },
+          })
+      );
+
+      if (hasBodyAnchors) {
+        setPoseFound(true);
+        setTryonPoseIssues(analysis.issues || []);
+        staleLayoutFramesRef.current = 0;
+
+        if (isPrimaryGood) {
+          goodFramesRef.current = Math.min(goodFramesRef.current + 1, 8);
+          if (goodFramesRef.current >= 8) {
+            setPoseLocked(true);
+          }
+        } else {
+          goodFramesRef.current = Math.max(0, goodFramesRef.current - 1);
+        }
+
+        gownLayoutSmoothRef.current = smoothGownLayout(gownLayoutSmoothRef.current, layout, 0.92);
+        lastGoodLayoutRef.current = gownLayoutSmoothRef.current;
         setLiveGownLayout({ ...gownLayoutSmoothRef.current });
-        setTryonPoseOk(true);
       } else {
-        setTryonPoseOk(false);
-        if (!analysis.shouldersOk || !analysis.hipsOk) {
+        setPoseFound(false);
+        setTryonPoseIssues(analysis.issues || []);
+        // Web version decrements by 2, not 1 — faster rejection of weak frames
+        goodFramesRef.current = Math.max(0, goodFramesRef.current - 2);
+        if (goodFramesRef.current === 0) {
+          setPoseLocked(false);
+        }
+
+        staleLayoutFramesRef.current += 1;
+        // Keep the last known position visible for a short grace period so the gown does
+        // not vanish during normal pose jitter (web also does this)
+        if (staleLayoutFramesRef.current >= 30) {
           gownLayoutSmoothRef.current = null;
+          lastGoodLayoutRef.current = null;
           setLiveGownLayout(null);
         }
       }
-
-      const maskLm = {};
-      for (const k of ["leftWrist", "rightWrist", "leftElbow", "rightElbow"]) {
-        const p = landmarks[k];
-        if (p) maskLm[k] = { x: p.x, y: p.y };
-      }
-      setLandmarksForMask(Object.keys(maskLm).length ? maskLm : null);
     },
-    [autoFitEnabled, cameraFacing, canUseNativePose]
+    [cameraFacing, canUseNativePose]
   );
-
-  useEffect(() => {
-    if (!canUseNativePose || !autoFitEnabled) return undefined;
-    const id = setInterval(() => {
-      if (Date.now() - lastPoseAtRef.current > 900) {
-        setPoseDetected(false);
-      }
-    }, 350);
-    return () => clearInterval(id);
-  }, [autoFitEnabled, canUseNativePose]);
 
   useEffect(() => {
     previewLayoutRef.current = previewLayout;
   }, [previewLayout]);
 
+  // Log gown overlay visibility state for debugging
+  useEffect(() => {
+    console.log("[AR] Overlay state:", {
+      showGownOverlay,
+      hasLayout: !!overlayLayout,
+      displayUri: Boolean(displayUri),
+      poseLocked,
+      poseFound,
+      canCaptureGown,
+      previewDims: previewLayout,
+    });
+  }, [showGownOverlay, overlayLayout, displayUri, poseLocked, poseFound, canCaptureGown, previewLayout]);
+
   useEffect(() => {
     gownLayoutSmoothRef.current = null;
+    lastGoodLayoutRef.current = null;
     setLiveGownLayout(null);
-    setLandmarksForMask(null);
-    setTryonPoseOk(false);
+    setPoseLocked(false);
+    setPoseFound(false);
+    setShouldersFound(false);
+    setHipsFound(false);
     setTryonPoseIssues([]);
-    lastPoseAtRef.current = 0;
-    setPoseDetected(false);
-    setNativeMaskUri(null);
+    setFacingBack(false);
+    goodFramesRef.current = 0;
+    facingBackFramesRef.current = 0;
+    staleLayoutFramesRef.current = 0;
+    prevKpsRef.current = null;
   }, [cameraFacing, selectedGown?.id]);
 
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => true,
-        onPanResponderMove: Animated.event([null, { dx: overlayPan.x, dy: overlayPan.y }], {
-          useNativeDriver: false,
-        }),
-        onPanResponderRelease: () => {
-          overlayPan.extractOffset();
-          overlayPan.setValue({ x: 0, y: 0 });
-        },
-      }),
-    [overlayPan]
-  );
+  // Timer countdown
+  useEffect(() => {
+    if (countdown === null) return;
+    if (countdown <= 0) {
+      onCaptureAndSave();
+      return;
+    }
+    countdownRef.current = setTimeout(() => setCountdown(countdown - 1), 1000);
+    return () => clearTimeout(countdownRef.current);
+  }, [countdown]);
+
+  const startTimedCapture = useCallback(() => {
+    if (timerSecs === 0) {
+      onCaptureAndSave();
+    } else {
+      setCountdown(timerSecs);
+    }
+  }, [timerSecs]);
+
+  const cancelCountdown = useCallback(() => {
+    clearTimeout(countdownRef.current);
+    setCountdown(null);
+  }, []);
 
   const onCaptureAndSave = async () => {
+    let capturedPhotoPath = null;
+    let profileSaved = false;
     try {
       setSaving(true);
+      const cameraPhoto = await cameraRef.current?.takePhoto?.();
+      if (cameraPhoto?.path) {
+        capturedPhotoPath = cameraPhoto.path;
+        const photoUri = cameraPhoto.path.startsWith("file://")
+          ? cameraPhoto.path
+          : `file://${cameraPhoto.path}`;
+        setCapturePhotoUri(photoUri);
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      }
+
       const base64 = await captureRef(previewRef, {
         format: "jpg",
         quality: 0.9,
@@ -274,13 +376,14 @@ export function ARTryOnScreen({ route }) {
             gownId: selectedGown?.id,
             gownName: route?.params?.gownName || selectedGown?.name || "",
           });
+          profileSaved = true;
           navigation.navigate("FittingStudio", {
             panel: "tryon",
             gownId: selectedGown?.id,
             tryonSaveMsg: "✓ Saved to your profile",
           });
         } catch (e) {
-          Alert.alert("Profile save failed", e?.message || "Could not save to your account.");
+          console.warn("Profile snapshot was not saved:", e?.message || e);
         }
       }
 
@@ -291,16 +394,14 @@ export function ARTryOnScreen({ route }) {
       });
 
       try {
-        const permissionResult = await MediaLibrary.requestPermissionsAsync();
+        const permissionResult = await MediaLibrary.requestPermissionsAsync(true);
         if (!permissionResult.granted) {
           const canShare = await Sharing.isAvailableAsync();
           if (canShare) {
-            await Sharing.shareAsync(uri, {
-              dialogTitle: "Save or share your AR preview",
-            });
+            await Sharing.shareAsync(uri, { dialogTitle: "Save or share your AR preview" });
             Alert.alert(
               "Preview ready",
-              saveToProfile
+              profileSaved
                 ? "Saved to your profile. Opened share options for your device gallery."
                 : "Opened share options so you can save the AR image."
             );
@@ -312,63 +413,40 @@ export function ARTryOnScreen({ route }) {
         await MediaLibrary.saveToLibraryAsync(uri);
         Alert.alert(
           "Saved",
-          saveToProfile
+          profileSaved
             ? "Try-on saved to your profile and device gallery."
             : "Your AR try-on preview has been saved to your gallery."
         );
       } catch {
         const canShare = await Sharing.isAvailableAsync();
         if (canShare) {
-          await Sharing.shareAsync(uri, {
-            dialogTitle: "Save or share your AR preview",
-          });
+          await Sharing.shareAsync(uri, { dialogTitle: "Save or share your AR preview" });
           Alert.alert(
             "Preview ready",
-            saveToProfile
+            profileSaved
               ? "Saved to your profile. Opened share options for your device."
               : "Opened share options so you can save the AR image."
           );
-        } else if (saveToProfile) {
+        } else if (profileSaved) {
           Alert.alert("Saved to profile", "Try-on image saved to your account.");
         } else {
-          Alert.alert(
-            "Save not available here",
-            "Preview capture works, but gallery save needs a development build/rebuild with media permission enabled."
-          );
+          Alert.alert("Preview captured", "The preview was captured, but could not be saved to the gallery.");
         }
       }
     } catch (err) {
       Alert.alert("Save failed", "Could not save preview. Please try again.");
     } finally {
+      setCapturePhotoUri(null);
       setSaving(false);
+      if (capturedPhotoPath) {
+        try {
+          const FileSystem = require("react-native-fs");
+          await FileSystem.unlink(capturedPhotoPath);
+        } catch {
+          // The temporary camera photo may already have been removed by the camera.
+        }
+      }
     }
-  };
-
-  const onResetFit = () => {
-    overlayPan.setOffset({ x: 0, y: 0 });
-    overlayPan.setValue({ x: 0, y: 0 });
-    setOverlayScale(1);
-    setOverlayOpacity(0.72);
-    setFitModel(DEFAULT_FIT_MODEL);
-    setAutoFitEnabled(true);
-    gownLayoutSmoothRef.current = null;
-    setLiveGownLayout(null);
-    setLandmarksForMask(null);
-    setTryonPoseOk(false);
-    lastPoseAtRef.current = 0;
-    setPoseDetected(false);
-    setNativeMaskUri(null);
-  };
-
-  const onSaveFitProfile = async () => {
-    if (!selectedGown) return;
-    const next = {
-      ...fitProfiles,
-      [String(selectedGown.id)]: fitModel,
-    };
-    setFitProfiles(next);
-    await saveArFitProfiles(next);
-    Alert.alert("Fit saved", `${selectedGown.name} fit profile saved.`);
   };
 
   if (!permission) {
@@ -382,9 +460,9 @@ export function ARTryOnScreen({ route }) {
   if (!permission.granted) {
     return (
       <View style={styles.screen}>
-        <Text style={styles.title}>Try AR Dress</Text>
+        <Text style={styles.title}>AR Try-On</Text>
         <Text style={styles.subtitle}>
-          To start AR try-on, allow camera access. We only use your camera for live preview.
+          To use AR try-on, allow camera access. We only use your camera for live preview.
         </Text>
         <Pressable style={styles.btn} onPress={requestPermission}>
           <Text style={styles.btnText}>Allow Camera Access</Text>
@@ -413,18 +491,11 @@ export function ARTryOnScreen({ route }) {
       nestedScrollEnabled
     >
       <View style={styles.header}>
-        <Text style={styles.title}>AR Try-On</Text>
-        <Text style={styles.subtitle}>
-          Pick a gown — it auto-fits to your shoulders and waist like the website try-on.
-        </Text>
-        <View style={styles.headerActions}>
-          <Pressable style={styles.headerBtn} onPress={() => setCameraFacing((v) => (v === "front" ? "back" : "front"))}>
-            <Text style={styles.headerBtnText}>Flip Camera</Text>
-          </Pressable>
-          <Pressable style={styles.headerBtn} onPress={onResetFit}>
-            <Text style={styles.headerBtnText}>Reset Fit</Text>
-          </Pressable>
-        </View>
+        <Text style={styles.title}>Try On</Text>
+        <Text style={styles.subtitle}>{selectedGown.name}</Text>
+        <Pressable style={styles.flipBtn} onPress={() => setCameraFacing((v) => (v === "front" ? "back" : "front"))}>
+          <Text style={styles.flipBtnText}>🔄 Flip Camera</Text>
+        </Pressable>
       </View>
 
       <View
@@ -436,264 +507,101 @@ export function ARTryOnScreen({ route }) {
           setPreviewLayout({ width, height });
         }}
       >
-        {canUseNativePose ? (
-          <NativePoseCamera
-            facing={cameraFacing}
-            isActive={Boolean(permission?.granted && isFocused)}
-            onPoseMap={onPoseMap}
-            onVideoDimensions={onVideoDimensions}
-            targetFps={12}
-            segmentationEnabled={segmentationNativeLinked && nativeSegmentationEnabled}
-            segmentationFps={5}
-            onSegmentationResult={onSegmentationResult}
-            brightenPreview
-            resizeMode="cover"
-            enablePinchZoom
+        <MoveNetPoseCamera
+          facing={cameraFacing}
+          ref={cameraRef}
+          isActive={Boolean(permission?.granted && isFocused)}
+          onPoseMap={onPoseMap}
+          onVideoDimensions={onVideoDimensions}
+          onModelStatus={setModelReady}
+          targetFps={12}
+          resizeMode="contain"
+        />
+
+        {capturePhotoUri && (
+          <Image
+            source={{ uri: capturePhotoUri }}
+            style={StyleSheet.absoluteFill}
+            resizeMode="contain"
+            pointerEvents="none"
           />
-        ) : (
-          <CameraView style={styles.camera} facing={cameraFacing} />
         )}
-        {useWebBodyFit ? (
+
+        {showGownOverlay && overlayLayout && (
           <GownFittedOverlay
             width={previewLayout.width}
             height={previewLayout.height}
-            uri={tryonUri}
-            layout={liveGownLayout}
-            opacity={overlayOpacity}
-            landmarksNorm={landmarksForMask}
-            limbHoles={limbOcclusionEnabled && !showNativePersonMask}
+            uri={displayUri}
+            layout={overlayLayout}
+            opacity={0.88}
           />
-        ) : showNativePersonMask ? (
-          <View
-            style={styles.fullOverlay}
-            onLayout={(e) => {
-              const { width, height } = e.nativeEvent.layout;
-              setOverlayLayout({ width, height });
-            }}
-          >
-            <GownNativeSegmentationOverlay
-              width={overlayLayout.width || previewLayout.width}
-              height={overlayLayout.height || previewLayout.height}
-              gownUri={tryonUri || selectedGown.image}
-              maskDataUri={nativeMaskUri}
-              opacity={overlayOpacity}
-            />
-          </View>
-        ) : (
-          <Animated.View
-            style={[
-              styles.overlayMover,
-              {
-                transform: [
-                  { translateX: overlayPan.x },
-                  { translateY: overlayPan.y },
-                  { scale: overlayScale },
-                ],
-              },
-            ]}
-            onLayout={(e) => {
-              const { width, height } = e.nativeEvent.layout;
-              setOverlayLayout({ width, height });
-            }}
-            {...panResponder.panHandlers}
-          >
-            <Image
-              source={{ uri: tryonUri || selectedGown.image }}
-              style={[styles.overlayImage, { opacity: overlayOpacity }]}
-            />
-          </Animated.View>
-        )}
-        <View style={styles.overlayLabel}>
-          <Text style={styles.overlayLabelText}>
-            {selectedGown.name} •{" "}
-            {useWebBodyFit
-              ? "Fitted to your body"
-              : autoFitEnabled && canUseNativePose
-                ? tryonPoseIssues[0]
-                  ? "Step back — show full body"
-                  : "Finding your pose…"
-                : "Drag to position"}
-          </Text>
-        </View>
-      </View>
-
-      <View style={styles.controlsCard}>
-        <View style={styles.controlRow}>
-          <Text style={styles.controlLabel}>Auto-fit to body</Text>
-          <Pressable
-            style={[styles.toggleBtn, autoFitEnabled ? styles.toggleBtnActive : null]}
-            onPress={() => {
-              const next = !autoFitEnabled;
-              setAutoFitEnabled(next);
-              if (!next) {
-                setPoseDetected(false);
-                setLiveGownLayout(null);
-                setLandmarksForMask(null);
-                setTryonPoseOk(false);
-                gownLayoutSmoothRef.current = null;
-              }
-            }}
-          >
-            <Text style={[styles.toggleText, autoFitEnabled ? styles.toggleTextActive : null]}>
-              {autoFitEnabled ? "ON" : "OFF"}
-            </Text>
-          </Pressable>
-        </View>
-        {canUseNativePose && segmentationNativeLinked ? (
-          <View style={styles.controlRow}>
-            <Text style={styles.controlLabel}>Native person mask</Text>
-            <Pressable
-              style={[styles.toggleBtn, nativeSegmentationEnabled ? styles.toggleBtnActive : null]}
-              onPress={() => setNativeSegmentationEnabled((v) => !v)}
-            >
-              <Text style={[styles.toggleText, nativeSegmentationEnabled ? styles.toggleTextActive : null]}>
-                {nativeSegmentationEnabled ? "ON" : "OFF"}
-              </Text>
-            </Pressable>
-          </View>
-        ) : null}
-        {canUseNativePose ? (
-          <View style={styles.controlRow}>
-            <Text style={styles.controlLabel}>Limb holes (pose)</Text>
-            <Pressable
-              style={[styles.toggleBtn, limbOcclusionEnabled ? styles.toggleBtnActive : null]}
-              onPress={() => setLimbOcclusionEnabled((v) => !v)}
-            >
-              <Text style={[styles.toggleText, limbOcclusionEnabled ? styles.toggleTextActive : null]}>
-                {limbOcclusionEnabled ? "ON" : "OFF"}
-              </Text>
-            </Pressable>
-          </View>
-        ) : null}
-        <Text style={styles.hintText}>
-          {!canUseNativePose
-            ? Platform.OS === "web"
-              ? "Web preview uses manual fit. Use iOS/Android dev build for live pose."
-              : "Expo Go cannot run frame processors. Use a dev build (expo run:android) for live pose + limb masking."
-            : useWebBodyFit
-              ? "Gown follows your shoulders, waist, and legs — same as the website fitting room."
-              : poseDetected
-                ? "Tracking pose…"
-                : autoFitEnabled
-                  ? "Stand 1.5–2 m back, full body in frame, face the camera (not a mirror)."
-                  : "Auto-fit off — drag the gown and use size/opacity."}
-        </Text>
-
-        {autoFitEnabled && !useWebBodyFit && (
-          <>
-            <View style={styles.controlRow}>
-              <Text style={styles.controlLabel}>Body Center X</Text>
-              <View style={styles.stepper}>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("centerX", -0.015, 0.32, 0.68)}>
-                  <Ionicons name="remove" size={16} color={brand.dark} />
-                </Pressable>
-                <Text style={styles.stepValue}>{Math.round(fitModel.centerX * 100)}%</Text>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("centerX", 0.015, 0.32, 0.68)}>
-                  <Ionicons name="add" size={16} color={brand.dark} />
-                </Pressable>
-              </View>
-            </View>
-
-            <View style={styles.controlRow}>
-              <Text style={styles.controlLabel}>Body Center Y</Text>
-              <View style={styles.stepper}>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("centerY", -0.015, 0.36, 0.62)}>
-                  <Ionicons name="remove" size={16} color={brand.dark} />
-                </Pressable>
-                <Text style={styles.stepValue}>{Math.round(fitModel.centerY * 100)}%</Text>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("centerY", 0.015, 0.36, 0.62)}>
-                  <Ionicons name="add" size={16} color={brand.dark} />
-                </Pressable>
-              </View>
-            </View>
-
-            <View style={styles.controlRow}>
-              <Text style={styles.controlLabel}>Shoulder Width</Text>
-              <View style={styles.stepper}>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("shoulderWidth", -0.012, 0.16, 0.42)}>
-                  <Ionicons name="remove" size={16} color={brand.dark} />
-                </Pressable>
-                <Text style={styles.stepValue}>{Math.round(fitModel.shoulderWidth * 100)}%</Text>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("shoulderWidth", 0.012, 0.16, 0.42)}>
-                  <Ionicons name="add" size={16} color={brand.dark} />
-                </Pressable>
-              </View>
-            </View>
-
-            <View style={styles.controlRow}>
-              <Text style={styles.controlLabel}>Torso Height</Text>
-              <View style={styles.stepper}>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("torsoHeight", -0.012, 0.18, 0.48)}>
-                  <Ionicons name="remove" size={16} color={brand.dark} />
-                </Pressable>
-                <Text style={styles.stepValue}>{Math.round(fitModel.torsoHeight * 100)}%</Text>
-                <Pressable style={styles.stepBtn} onPress={() => adjustFit("torsoHeight", 0.012, 0.18, 0.48)}>
-                  <Ionicons name="add" size={16} color={brand.dark} />
-                </Pressable>
-              </View>
-            </View>
-          </>
         )}
 
-        <View style={styles.controlRow}>
-          <Text style={styles.controlLabel}>Size</Text>
-          <View style={styles.stepper}>
-            <Pressable style={styles.stepBtn} onPress={onScaleDown}>
-              <Ionicons name="remove" size={16} color={brand.dark} />
-            </Pressable>
-            <Text style={styles.stepValue}>{Math.round(overlayScale * 100)}%</Text>
-            <Pressable style={styles.stepBtn} onPress={onScaleUp}>
-              <Ionicons name="add" size={16} color={brand.dark} />
-            </Pressable>
+        {canCaptureGown && countdown === null && (
+          <View style={styles.poseBadge}>
+            <Text style={styles.poseBadgeText}>🔒 Locked</Text>
           </View>
-        </View>
+        )}
 
-        <View style={styles.controlRow}>
-          <Text style={styles.controlLabel}>Opacity</Text>
-          <View style={styles.stepper}>
-            <Pressable style={styles.stepBtn} onPress={onOpacityDown}>
-              <Ionicons name="remove" size={16} color={brand.dark} />
-            </Pressable>
-            <Text style={styles.stepValue}>{Math.round(overlayOpacity * 100)}%</Text>
-            <Pressable style={styles.stepBtn} onPress={onOpacityUp}>
-              <Ionicons name="add" size={16} color={brand.dark} />
-            </Pressable>
+        {countdown !== null && (
+          <View style={styles.countdownOverlay}>
+            <Text style={styles.countdownText}>{countdown}</Text>
           </View>
-        </View>
+        )}
       </View>
 
-      <Text style={styles.pickerTitle}>Choose item</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.pickerRow} nestedScrollEnabled>
-        {catalogGowns.map((g) => {
-          const active = selectedGown && idsEqual(g.id, selectedGown.id);
-          return (
-            <Pressable
-              key={g.id}
-              style={[styles.chip, active ? styles.chipActive : null]}
-              onPress={() => setSelectedId(g.id)}
-            >
-              <Text style={[styles.chipText, active ? styles.chipTextActive : null]} numberOfLines={1}>
-                {g.name}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
-
-      <Pressable style={styles.btn} onPress={onCaptureAndSave} disabled={saving}>
-        {saving ? (
+      <Pressable
+        style={styles.btn}
+        onPress={countdown !== null ? cancelCountdown : startTimedCapture}
+        disabled={saving || !canCaptureGown}
+      >
+        {countdown !== null ? (
+          <Text style={styles.btnText}>Cancel ({countdown}s)</Text>
+        ) : saving ? (
           <View style={styles.savingRow}>
             <ActivityIndicator size="small" color={brand.white} />
             <Text style={styles.btnText}>Saving…</Text>
           </View>
         ) : (
-          <Text style={styles.btnText}>Capture & Save Preview</Text>
+          <Text style={styles.btnText}>📷 Capture</Text>
         )}
       </Pressable>
 
-      <Pressable style={styles.secondaryBtn} onPress={onSaveFitProfile}>
-        <Text style={styles.secondaryBtnText}>Save Fit for This Gown</Text>
-      </Pressable>
+      {canCaptureGown && countdown === null && (
+        <View style={styles.timerGroup}>
+          <Text style={styles.timerCaption}>Self-timer</Text>
+          <View style={styles.timerRow}>
+            {[0, 3, 5, 10].map((s) => (
+              <Pressable
+                key={s}
+                style={[styles.timerBtn, timerSecs === s ? styles.timerBtnActive : null]}
+                onPress={() => setTimerSecs(s)}
+                disabled={countdown !== null}
+              >
+                <Text style={[styles.timerBtnText, timerSecs === s ? styles.timerBtnTextActive : null]}>
+                  {s === 0 ? "No timer" : `${s}s`}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </View>
+      )}
+
+      <Text style={styles.label}>Choose a gown</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.strip} nestedScrollEnabled>
+        {catalogGowns.map((g) => (
+          <Pressable
+            key={g.id}
+            style={[styles.stripItem, idsEqual(g.id, selectedGown?.id) ? styles.stripItemSel : null]}
+            onPress={() => setSelectedId(g.id)}
+          >
+            <Image source={{ uri: g.image }} style={styles.stripThumb} />
+            <Text style={styles.stripName} numberOfLines={2}>
+              {g.name}
+            </Text>
+          </Pressable>
+        ))}
+      </ScrollView>
     </ScrollView>
   );
 }
@@ -702,116 +610,40 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: brand.bg },
   screenContent: { padding: 16, paddingBottom: 28 },
   center: { flex: 1, backgroundColor: brand.bg, alignItems: "center", justifyContent: "center", padding: 16 },
-  header: { marginBottom: 10 },
-  title: { fontSize: 30, color: brand.dark, fontWeight: "900", marginBottom: 4, fontStyle: "italic" },
-  subtitle: { color: brand.textLight, lineHeight: 19, fontSize: 12 },
-  headerActions: { flexDirection: "row", gap: 8, marginTop: 8 },
-  headerBtn: {
-    borderWidth: 1,
-    borderColor: brand.border,
-    backgroundColor: brand.white,
-    borderRadius: 999,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-  },
-  headerBtnText: { color: brand.dark, fontSize: 11, fontWeight: "800", letterSpacing: 0.8 },
+  header: { marginBottom: 12 },
+  title: { fontSize: 28, color: brand.dark, fontWeight: "900", marginBottom: 4, fontStyle: "italic" },
+  subtitle: { color: brand.textLight, lineHeight: 18, fontSize: 12, marginBottom: 8 },
+  flipBtn: { paddingVertical: 8, paddingHorizontal: 12, backgroundColor: brand.white, borderRadius: 8, borderWidth: 1, borderColor: brand.border, alignSelf: "flex-start" },
+  flipBtnText: { color: brand.dark, fontSize: 11, fontWeight: "700" },
 
-  cameraWrap: {
-    height: 430,
-    borderRadius: 16,
-    overflow: "hidden",
-    borderWidth: 1,
-    borderColor: brand.border,
-    backgroundColor: brand.white,
-  },
+  cameraWrap: { height: 430, borderRadius: 12, overflow: "hidden", borderWidth: 1, borderColor: brand.border, backgroundColor: brand.white, marginBottom: 12, position: "relative" },
   camera: { flex: 1 },
-  fullOverlay: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  overlayMover: {
-    position: "absolute",
-    bottom: 0,
-    left: "12%",
-    right: "12%",
-    height: "78%",
-  },
-  overlayImage: {
-    width: "100%",
-    height: "100%",
-    resizeMode: "contain",
-  },
-  overlayLabel: {
-    position: "absolute",
-    top: 10,
-    left: 10,
-    right: 10,
-    backgroundColor: "rgba(255,255,255,0.92)",
-    borderRadius: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderWidth: 1,
-    borderColor: brand.border,
-  },
+
+  overlayLabel: { position: "absolute", top: 10, left: 10, right: 10, backgroundColor: "rgba(255,255,255,0.92)", borderRadius: 10, paddingVertical: 6, paddingHorizontal: 10, borderWidth: 1, borderColor: brand.border },
   overlayLabelText: { color: brand.dark, fontWeight: "800", fontSize: 12, textAlign: "center" },
 
-  controlsCard: {
-    marginTop: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: brand.border,
-    backgroundColor: brand.white,
-    padding: 12,
-    gap: 10,
-  },
-  controlRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  controlLabel: { color: brand.dark, fontWeight: "800", fontSize: 13 },
-  toggleBtn: {
-    minWidth: 54,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 6,
-    paddingHorizontal: 10,
-    borderWidth: 1,
-    borderColor: brand.border,
-    borderRadius: 999,
-    backgroundColor: brand.white,
-  },
-  toggleBtnActive: { backgroundColor: brand.dark, borderColor: brand.dark },
-  toggleText: { color: brand.dark, fontSize: 11, fontWeight: "900", letterSpacing: 1.2 },
-  toggleTextActive: { color: brand.white },
-  hintText: { color: brand.textLight, fontSize: 11, marginTop: -3, marginBottom: 2, lineHeight: 16 },
-  stepper: { flexDirection: "row", alignItems: "center", gap: 8 },
-  stepBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: brand.border,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: brand.accentSoft,
-  },
-  stepValue: { minWidth: 45, textAlign: "center", color: brand.dark, fontWeight: "800", fontSize: 12 },
+  poseBadge: { position: "absolute", top: 10, left: 10, backgroundColor: "rgba(29,158,117,0.85)", borderRadius: 20, paddingVertical: 4, paddingHorizontal: 12 },
+  poseBadgeText: { color: brand.white, fontWeight: "700", fontSize: 11 },
 
-  pickerTitle: { marginTop: 12, color: brand.dark, fontWeight: "900", fontSize: 14 },
-  pickerRow: { paddingTop: 8, paddingBottom: 4, gap: 8 },
-  chip: {
-    maxWidth: 170,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: brand.border,
-    backgroundColor: brand.white,
-  },
-  chipActive: { backgroundColor: brand.dark, borderColor: brand.dark },
-  chipText: { color: brand.dark, fontWeight: "700", fontSize: 12 },
-  chipTextActive: { color: brand.white },
+  countdownOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.5)", alignItems: "center", justifyContent: "center" },
+  countdownText: { fontSize: 100, fontWeight: "200", color: brand.white },
 
-  btn: { marginTop: 10, backgroundColor: brand.button, paddingVertical: 12, borderRadius: 10, alignItems: "center" },
+  btn: { backgroundColor: brand.button, paddingVertical: 12, borderRadius: 10, alignItems: "center", marginBottom: 8 },
   savingRow: { flexDirection: "row", gap: 8, alignItems: "center" },
-  btnText: { color: brand.white, fontWeight: "800", letterSpacing: 1.1, fontSize: 12 },
-  secondaryBtn: { marginTop: 8, backgroundColor: brand.white, borderWidth: 1, borderColor: brand.border, paddingVertical: 12, borderRadius: 10, alignItems: "center" },
-  secondaryBtnText: { color: brand.dark, fontWeight: "800", letterSpacing: 0.9, fontSize: 12 },
-});
+  btnText: { color: brand.white, fontWeight: "800", letterSpacing: 1, fontSize: 12 },
 
+  timerGroup: { marginBottom: 12, gap: 6 },
+  timerCaption: { color: brand.textLight, fontSize: 10, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+  timerRow: { flexDirection: "row", gap: 6, backgroundColor: brand.white, borderRadius: 8, padding: 4, borderWidth: 1, borderColor: brand.border },
+  timerBtn: { flex: 1, paddingVertical: 6, paddingHorizontal: 8, borderRadius: 6, backgroundColor: "transparent" },
+  timerBtnActive: { backgroundColor: brand.dark },
+  timerBtnText: { color: brand.dark, fontSize: 10, fontWeight: "700", textAlign: "center" },
+  timerBtnTextActive: { color: brand.white },
+
+  label: { fontSize: 11, fontWeight: "700", color: brand.textLight, textTransform: "uppercase", marginBottom: 8 },
+  strip: { flexGrow: 0 },
+  stripItem: { width: 88, marginRight: 10, padding: 4, borderRadius: 8, borderWidth: 2, borderColor: "transparent" },
+  stripItemSel: { borderColor: brand.buttonAlt, backgroundColor: "#f5eadc" },
+  stripThumb: { width: 80, height: 100, borderRadius: 6, backgroundColor: "#f3edf0" },
+  stripName: { fontSize: 10, color: brand.dark, marginTop: 4, fontWeight: "600" },
+});

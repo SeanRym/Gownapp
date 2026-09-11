@@ -26,6 +26,13 @@ function toInventoryObject(raw) {
   return obj;
 }
 
+function normalizeRemoteImageUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^(https?:|data:|file:|content:|ph:|assets-library:)/i.test(raw)) return raw;
+  return `${String(API_BASE_URL).replace(/\/+$/, "")}/${raw.replace(/^\/+/, "")}`;
+}
+
 function normalizeRemoteGown(item, archivedFallback = false) {
   const sizeInventory = toInventoryObject(item?.inventory || item?.sizeStock || []);
   const stockQtyFromInventory = Object.values(sizeInventory).reduce((sum, qty) => sum + (Number(qty) || 0), 0);
@@ -37,9 +44,9 @@ function normalizeRemoteGown(item, archivedFallback = false) {
     price: toPriceText(item?.price ?? item?.salePrice),
     promoPrice: String(item?.promoPrice || "").trim(),
     promo: Boolean(item?.promo),
-    image: String(item?.image || "").trim(),
-    tryonImage: String(item?.tryonImage || item?.tryon_image_url || item?.image || "").trim(),
-    tryonImageBack: String(item?.tryonImageBack || item?.tryon_image_back_url || "").trim() || null,
+    image: normalizeRemoteImageUrl(item?.image),
+    tryonImage: normalizeRemoteImageUrl(item?.tryonImage || item?.tryon_image_url || item?.image),
+    tryonImageBack: normalizeRemoteImageUrl(item?.tryonImageBack || item?.tryon_image_back_url) || null,
     tryonCalibration: item?.tryonCalibration ?? item?.tryon_calibration ?? null,
     alt: String(item?.alt || item?.name || "").trim(),
     type: String(item?.type || "Gowns").trim(),
@@ -49,7 +56,7 @@ function normalizeRemoteGown(item, archivedFallback = false) {
     neckline: String(item?.neckline || "").trim(),
     fabric: String(item?.fabric || "").trim(),
     additionalImages: Array.isArray(item?.additionalImages)
-      ? item.additionalImages.map((x) => String(x || "").trim()).filter(Boolean)
+      ? item.additionalImages.map(normalizeRemoteImageUrl).filter(Boolean)
       : [],
     sizeInventory,
     stockQty: Math.max(0, stockQty),
@@ -94,6 +101,34 @@ function buildInventoryList(sizeInventory) {
       stock: Math.max(0, Number(qty) || 0),
     }))
     .filter((x) => x.size);
+}
+
+function parseSalePrice(value) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return 0;
+  const n = Number(raw.replace(/[^\d.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+
+function coerceNumber(value, fallback = 0) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const compact = value.replace(/[^\d.\-]/g, "");
+    const n = Number(compact);
+    if (Number.isFinite(n)) return n;
+  }
+  return Number.isFinite(Number(value)) ? Number(value) : fallback;
+}
+
+function buildSkuName(value) {
+  const seed = String(value || "").trim();
+  if (!seed) return `gown-${Date.now().toString().slice(-8)}`;
+  const slug = seed
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+  return slug || `gown-${Date.now().toString().slice(-8)}`;
 }
 
 async function requestJson(path, options = {}) {
@@ -175,6 +210,37 @@ export async function uploadAdminTryonImage(localUri) {
   return { ok: true, url: String(body.url || "").trim() };
 }
 
+export async function removeBackgroundFromImage(sourceUrl, tolerance = 35) {
+  const value = String(sourceUrl || "").trim();
+  if (!value) return { ok: false, error: "No image selected." };
+
+  try {
+    const payload = {
+      imageUrl: value,
+      tolerance: Math.max(0, Math.min(100, Number(tolerance) || 35)),
+    };
+    const response = await fetch(makeUrl("/api/admin/remove-background"), {
+      method: "POST",
+      headers: adminAuthHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+    });
+    let body = null;
+    try {
+      body = await response.json();
+    } catch {
+      body = null;
+    }
+    if (response.ok && (body?.ok || body?.url || body?.imageUrl || body?.outputUrl)) {
+      return { ok: true, url: String(body?.url || body?.imageUrl || body?.outputUrl || value).trim() };
+    }
+  } catch (err) {
+    console.log("[removeBackgroundFromImage] Endpoint call failed:", err.message);
+  }
+
+  // Fallback: return original image
+  return { ok: true, url: value, fallback: true };
+}
+
 async function resolveRemoteImageUrl(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -196,10 +262,24 @@ export async function upsertGownAdmin(payload) {
       resolveRemoteImageUrl(payload?.tryonImageBack),
       resolveRemoteImageUrl(payload?.additionalImage1),
     ]);
+    const inventoryRows = buildInventoryList(payload?.sizeInventory);
+    const salePrice = parseSalePrice(payload?.salePrice ?? payload?.price ?? 0);
+    const priceNumber = coerceNumber(payload?.salePrice ?? payload?.price ?? salePrice, salePrice);
+    const name = String(payload?.name || "").trim();
+    const explicitPriceText = String(payload?.price || "").trim();
+    const normalizedPrice = explicitPriceText || `P${salePrice.toLocaleString("en-PH")}`;
+    const sizeInventory = Object.fromEntries(
+      inventoryRows.map(({ size, stock }) => [String(size).trim(), Math.max(0, Number(stock) || 0)])
+    );
+    const stockQty = inventoryRows.reduce((sum, row) => sum + (Number(row.stock) || 0), 0);
+    const promoPriceText = String(payload?.promoPrice || "").trim();
     const body = {
       id: id || undefined,
-      name: String(payload?.name || "").trim(),
-      price: String(payload?.price || "").trim() || "P0",
+      sku: String(payload?.sku || "").trim() || `${buildSkuName(name)}-${Date.now().toString().slice(-6)}`,
+      name,
+      salePrice: priceNumber,
+      price: priceNumber || normalizedPrice,
+      priceText: normalizedPrice,
       image,
       alt: String(payload?.alt || "").trim(),
       tryonImage: tryonImage || image,
@@ -212,8 +292,16 @@ export async function upsertGownAdmin(payload) {
       neckline: String(payload?.neckline || "").trim(),
       fabric: String(payload?.fabric || "").trim(),
       promo: Boolean(payload?.promo),
-      promoPrice: String(payload?.promoPrice || "").trim(),
-      inventory: buildInventoryList(payload?.sizeInventory),
+      promoPrice: promoPriceText,
+      stockQty,
+      lowStockThreshold: Math.max(0, Number(payload?.lowStockThreshold) || 0),
+      inventory: inventoryRows,
+      sizeInventory,
+      sizeStock: inventoryRows,
+      stockBySize: sizeInventory,
+      sale_price: priceNumber,
+      price_value: priceNumber,
+      promo_price: promoPriceText,
     };
     if (additionalImage1) {
       body.additionalImages = [additionalImage1];

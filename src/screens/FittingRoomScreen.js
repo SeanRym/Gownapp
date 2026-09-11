@@ -17,6 +17,7 @@ import { fetchCmsSection } from "../services/cms";
 import { loadCartNote, saveCartNote } from "../utils/storage";
 import { brand } from "../theme/brand";
 import { getGownSizeOptions } from "../utils/cartLine";
+import { normalizeId } from "../utils/id";
 
 function formatPrice(n) {
   return `P${Number(n).toLocaleString("en-PH")}`;
@@ -31,9 +32,10 @@ function stockBadge(available) {
 }
 
 export function FittingRoomScreen({ navigation }) {
-  const { cartDetailed, user, setQty, changeCartLineSize, removeFromCart, syncCartFromServer, reloadGowns } =
+  const { cartDetailed, user, setQty, changeCartLineSize, removeFromCart, syncCartFromServer, reloadGowns, addToCart } =
     useShop();
   const [sizeChangingKey, setSizeChangingKey] = useState(null);
+  const [expandedAddSizeKey, setExpandedAddSizeKey] = useState(null);
   const [content, setContent] = useState({
     heading: "Your Fitting Room",
     subtitle: "Review your chosen pieces before we begin the fitting process.",
@@ -287,42 +289,75 @@ export function FittingRoomScreen({ navigation }) {
                   {(() => {
                     const sizeOptions = getGownSizeOptions(item);
                     if (!sizeOptions.length && !item.size) return null;
-                    const options =
-                      sizeOptions.length > 0
-                        ? sizeOptions
-                        : [{ size: item.size, available: item.stockAvailable }];
+                    const currentSizeKey = String(item.size || "").trim().toLowerCase();
+                    const existingSizes = new Set(
+                      cartDetailed
+                        .filter((row) => normalizeId(row.id) === normalizeId(item.id))
+                        .map((row) => String(row.size || "").trim().toLowerCase())
+                        .filter(Boolean)
+                    );
+                    const currentSizeOption = sizeOptions.find(
+                      ({ size }) => String(size || "").trim().toLowerCase() === currentSizeKey
+                    );
+                    const remainingSizes = sizeOptions.filter(({ size, available }) => {
+                      const key = String(size || "").trim().toLowerCase();
+                      if (!key || key === currentSizeKey) return false;
+                      if (existingSizes.has(key)) return false;
+                      return available === null || available > 0;
+                    });
+                    const showAddAnother = remainingSizes.length > 0;
                     return (
                       <View style={styles.sizePillRow}>
-                        {options.map(({ size, available }) => {
-                          const isCurrent =
-                            String(size || "").trim().toLowerCase() ===
-                            String(item.size || "").trim().toLowerCase();
-                          const canSelect = isCurrent || (available !== null && available > 0);
-                          const changing = sizeChangingKey === item.lineKey;
-                          return (
+                        <Pressable
+                          key={item.size || currentSizeOption?.size || "current-size"}
+                          style={[styles.sizePill, styles.sizePillActive, sizeChangingKey === item.lineKey ? styles.sizePillBusy : null]}
+                          disabled={sizeChangingKey === item.lineKey}
+                          onPress={() => {
+                            if (item.size) {
+                              return;
+                            }
+                            const fallbackSize = currentSizeOption?.size || item.size;
+                            if (fallbackSize) onSizeChange(item, fallbackSize);
+                          }}
+                        >
+                          <Text style={[styles.sizePillText, styles.sizePillTextActive]}>
+                            {item.size || currentSizeOption?.size || "N/A"}
+                          </Text>
+                        </Pressable>
+
+                        {showAddAnother ? (
+                          <>
                             <Pressable
-                              key={size}
-                              style={[
-                                styles.sizePill,
-                                isCurrent ? styles.sizePillActive : null,
-                                !canSelect ? styles.sizePillDisabled : null,
-                                changing ? styles.sizePillBusy : null,
-                              ]}
-                              disabled={!canSelect || changing}
-                              onPress={() => onSizeChange(item, size)}
+                              style={styles.addAnotherTrigger}
+                              onPress={() =>
+                                setExpandedAddSizeKey((prev) => (prev === item.lineKey ? null : item.lineKey))
+                              }
                             >
-                              <Text
-                                style={[
-                                  styles.sizePillText,
-                                  isCurrent ? styles.sizePillTextActive : null,
-                                  !canSelect && !isCurrent ? styles.sizePillTextDisabled : null,
-                                ]}
-                              >
-                                {size}
-                              </Text>
+                              <Text style={styles.addAnotherText}>+ Add another size</Text>
                             </Pressable>
-                          );
-                        })}
+
+                            {expandedAddSizeKey === item.lineKey ? (
+                              <View style={styles.addAnotherPanel}>
+                                {remainingSizes.map(({ size }) => (
+                                  <Pressable
+                                    key={`${item.lineKey}-extra-${size}`}
+                                    style={styles.addAnotherSizeChip}
+                                    onPress={async () => {
+                                      const result = await addToCart(item.id, 1, { size });
+                                      if (!result?.ok) {
+                                        Alert.alert("Cannot add size", result?.reason || "Please try again.");
+                                        return;
+                                      }
+                                      setExpandedAddSizeKey(null);
+                                    }}
+                                  >
+                                    <Text style={styles.addAnotherSizeText}>{size}</Text>
+                                  </Pressable>
+                                ))}
+                              </View>
+                            ) : null}
+                          </>
+                        ) : null}
                       </View>
                     );
                   })()}
@@ -572,6 +607,33 @@ const styles = StyleSheet.create({
   sizePillText: { fontSize: 11, fontWeight: "700", color: brand.dark },
   sizePillTextActive: { color: brand.white },
   sizePillTextDisabled: { color: brand.textLight },
+  addAnotherTrigger: {
+    borderWidth: 1,
+    borderColor: brand.border,
+    backgroundColor: brand.white,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  addAnotherText: { fontSize: 11, fontWeight: "700", color: brand.dark },
+  addAnotherPanel: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 6,
+    width: "100%",
+  },
+  addAnotherSizeChip: {
+    borderWidth: 1,
+    borderColor: brand.border,
+    backgroundColor: brand.white,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    minWidth: 36,
+    alignItems: "center",
+  },
+  addAnotherSizeText: { fontSize: 11, fontWeight: "700", color: brand.dark },
   unitPrice: { color: brand.textLight, fontSize: 11, marginTop: 6 },
   badge: {
     alignSelf: "flex-start",

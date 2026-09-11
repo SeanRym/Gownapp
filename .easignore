@@ -1,0 +1,16 @@
+node_modules/
+.expo/
+.expo-export-temp/
+.tmp-export/
+.git/
+.idea/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+packages/*/android/build/
+packages/*/ios/build/
+*.log
+.env
+.env.*
+!.env.example

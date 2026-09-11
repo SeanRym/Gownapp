@@ -5,10 +5,30 @@ import { useShop } from "../context/ShopContext";
 import { changeUserPassword, deleteUserAccount, updateUserProfile } from "../services/authLocal";
 import { sendLoginOtp, verifyLoginOtp } from "../services/auth";
 import { getOrdersByEmail } from "../services/orders";
+import { saveMeasurements, saveStylePreferences } from "../services/fitting";
+import { useFitting } from "../context/FittingContext";
 import { loadCheckoutProfiles, saveCheckoutProfiles } from "../utils/storage";
+import { isAdminRole } from "../utils/access";
 import { brand } from "../theme/brand";
 
 const BROWN = "#3B2B1F";
+const CM_PER_INCH = 2.54;
+const KG_PER_POUND = 0.45359237;
+
+function measurementValue(value, field, unit) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  if (unit === "in") {
+    return (field === "weight" ? number / KG_PER_POUND : number / CM_PER_INCH).toFixed(1);
+  }
+  return number.toFixed(1);
+}
+
+function measurementToMetric(value, field, unit) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return unit === "in" ? number * (field === "weight" ? KG_PER_POUND : CM_PER_INCH) : number;
+}
 
 function initials(name) {
   const parts = String(name || "U")
@@ -72,7 +92,8 @@ function QuickLink({ label, onPress }) {
 
 export function ProfileScreen({ navigation }) {
   const { user, login, logout } = useShop();
-  const isAdmin = user?.role === "admin";
+  const { profile: fittingProfile, updateProfile: updateFittingProfile } = useFitting();
+  const isAdmin = isAdminRole(user?.role);
   const [editing, setEditing] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
@@ -83,6 +104,15 @@ export function ProfileScreen({ navigation }) {
   const [passwordStage, setPasswordStage] = useState("idle");
   const [passwordForm, setPasswordForm] = useState({ otp: "", newPassword: "", confirmPassword: "" });
   const [deletePassword, setDeletePassword] = useState("");
+  const [measurementEditing, setMeasurementEditing] = useState(false);
+  const [measurementUnit, setMeasurementUnit] = useState("cm");
+  const [measurementForm, setMeasurementForm] = useState({
+    bust: "",
+    waist: "",
+    hips: "",
+    height: "",
+    weight: "",
+  });
   const [checkoutDefaults, setCheckoutDefaults] = useState({
     firstName: "",
     lastName: "",
@@ -98,21 +128,36 @@ export function ProfileScreen({ navigation }) {
       name: String(user?.name || ""),
       phone: String(user?.phone || user?.phoneNumber || ""),
     });
+    setMeasurementForm({
+      bust: measurementValue(fittingProfile?.bust, "bust", measurementUnit),
+      waist: measurementValue(fittingProfile?.waist, "waist", measurementUnit),
+      hips: measurementValue(fittingProfile?.hips, "hips", measurementUnit),
+      height: measurementValue(fittingProfile?.height, "height", measurementUnit),
+      weight: measurementValue(fittingProfile?.weight, "weight", measurementUnit),
+    });
     (async () => {
       if (!user?.email) return;
       const checkoutProfiles = await loadCheckoutProfiles();
       const saved = checkoutProfiles?.[String(user.email).toLowerCase()];
-      if (saved) {
-        setCheckoutDefaults({
-          firstName: String(saved.firstName || ""),
-          lastName: String(saved.lastName || ""),
-          phone: String(saved.phone || ""),
-          address: String(saved.address || ""),
-          city: String(saved.city || ""),
-          province: String(saved.province || ""),
-          zip: String(saved.zip || ""),
-        });
-      }
+      const userAddressDefaults = {
+        firstName: String(user?.firstName || ""),
+        lastName: String(user?.lastName || ""),
+        phone: String(user?.phone || user?.phoneNumber || ""),
+        address: String(user?.address || ""),
+        city: String(user?.city || ""),
+        province: String(user?.province || ""),
+        zip: String(user?.zip || ""),
+      };
+      const nextCheckoutDefaults = {
+        firstName: String(userAddressDefaults.firstName || saved?.firstName || ""),
+        lastName: String(userAddressDefaults.lastName || saved?.lastName || ""),
+        phone: String(userAddressDefaults.phone || saved?.phone || ""),
+        address: String(userAddressDefaults.address || saved?.address || ""),
+        city: String(userAddressDefaults.city || saved?.city || ""),
+        province: String(userAddressDefaults.province || saved?.province || ""),
+        zip: String(userAddressDefaults.zip || saved?.zip || ""),
+      };
+      setCheckoutDefaults(nextCheckoutDefaults);
       try {
         const orders = await getOrdersByEmail(user.email, user.id);
         setRecentOrders(Array.isArray(orders) ? orders.slice(0, 3) : []);
@@ -120,39 +165,141 @@ export function ProfileScreen({ navigation }) {
         setRecentOrders([]);
       }
     })();
-  }, [user?.email, user?.id, user?.name, user?.phone]);
+  }, [user?.email, user?.id, user?.name, user?.phone, user?.firstName, user?.lastName, user?.address, user?.city, user?.province, user?.zip]);
 
   const completion = useMemo(
     () => profilePercent(user, checkoutDefaults),
     [user, checkoutDefaults]
   );
 
+  const hasSavedMeasurements = Boolean(
+    fittingProfile?.bust || fittingProfile?.waist || fittingProfile?.hips || fittingProfile?.height || fittingProfile?.weight
+  );
+
+  const openMeasurementStudio = () => {
+    navigation.navigate("FittingStudio", { panel: "scan" });
+  };
+
+  const resetMeasurementForm = () => {
+    setMeasurementForm({
+      bust: measurementValue(fittingProfile?.bust, "bust", measurementUnit),
+      waist: measurementValue(fittingProfile?.waist, "waist", measurementUnit),
+      hips: measurementValue(fittingProfile?.hips, "hips", measurementUnit),
+      height: measurementValue(fittingProfile?.height, "height", measurementUnit),
+      weight: measurementValue(fittingProfile?.weight, "weight", measurementUnit),
+    });
+  };
+
+  const toggleMeasurementUnit = () => {
+    const nextUnit = measurementUnit === "cm" ? "in" : "cm";
+    setMeasurementForm((current) =>
+      Object.fromEntries(
+        Object.entries(current).map(([field, value]) => [
+          field,
+          measurementValue(measurementToMetric(value, field, measurementUnit), field, nextUnit),
+        ])
+      )
+    );
+    setMeasurementUnit(nextUnit);
+  };
+
+  const onSaveMeasurements = async () => {
+    if (!user?.id) {
+      Alert.alert("Sign in required", "Please sign in to save your measurements.");
+      return;
+    }
+
+    const next = {
+      bust: measurementToMetric(measurementForm.bust, "bust", measurementUnit),
+      waist: measurementToMetric(measurementForm.waist, "waist", measurementUnit),
+      hips: measurementToMetric(measurementForm.hips, "hips", measurementUnit),
+      height: measurementToMetric(measurementForm.height, "height", measurementUnit),
+      weight: measurementToMetric(measurementForm.weight, "weight", measurementUnit),
+    };
+
+    if (!next.bust && !next.waist && !next.hips && !next.height && !next.weight) {
+      Alert.alert("No measurements", "Add at least one measurement before saving.");
+      return;
+    }
+
+    try {
+      const payload = {
+        ...fittingProfile,
+        ...next,
+        source: fittingProfile?.source || "manual",
+      };
+      updateFittingProfile(payload);
+      await saveMeasurements(user.id, {
+        bust_cm: next.bust,
+        waist_cm: next.waist,
+        hips_cm: next.hips,
+        height_cm: next.height,
+        weight_kg: next.weight,
+        source: payload.source,
+      });
+      await saveStylePreferences(user.id, payload);
+      updateFittingProfile({
+        bust: next.bust,
+        waist: next.waist,
+        hips: next.hips,
+        height: next.height,
+        weight: next.weight,
+        source: payload.source,
+      });
+      setMeasurementEditing(false);
+      Alert.alert("Saved", "Measurements saved to your fitting profile.");
+    } catch (e) {
+      Alert.alert("Save failed", e?.message || "Unable to save your measurements.");
+    }
+  };
+
   const onSaveAll = async () => {
     if (!user?.email) return;
     setBusy(true);
     try {
+      const cleanEmail = String(user.email).toLowerCase();
+      const all = await loadCheckoutProfiles();
+      const nameParts = String(profileForm.name || "").trim().split(/\s+/);
+      const persistedCheckout = {
+        ...checkoutDefaults,
+        firstName: checkoutDefaults.firstName || nameParts[0] || "",
+        lastName: checkoutDefaults.lastName || nameParts.slice(1).join(" ") || "",
+        phone: String(checkoutDefaults.phone || profileForm.phone || "").replace(/\D/g, ""),
+        address: String(checkoutDefaults.address || "").trim(),
+        city: String(checkoutDefaults.city || "").trim(),
+        province: String(checkoutDefaults.province || "").trim(),
+        zip: String(checkoutDefaults.zip || "").trim(),
+      };
+
       const res = await updateUserProfile({
         id: user.id,
         email: user.email,
         name: profileForm.name,
-        phone: profileForm.phone,
+        phone: persistedCheckout.phone,
+        address: persistedCheckout.address,
+        city: persistedCheckout.city,
+        province: persistedCheckout.province,
+        zip: persistedCheckout.zip,
       });
-      if (!res.ok) throw new Error(res.error || "Failed to save profile.");
+      if (!res?.ok) throw new Error(res?.error || "Unable to update profile.");
 
-      const cleanEmail = String(user.email).toLowerCase();
-      const all = await loadCheckoutProfiles();
-      const nameParts = String(profileForm.name || "").trim().split(/\s+/);
       await saveCheckoutProfiles({
         ...(all || {}),
-        [cleanEmail]: {
-          ...checkoutDefaults,
-          firstName: checkoutDefaults.firstName || nameParts[0] || "",
-          lastName: checkoutDefaults.lastName || nameParts.slice(1).join(" ") || "",
-          phone: String(checkoutDefaults.phone || profileForm.phone || "").replace(/\D/g, ""),
-        },
+        [cleanEmail]: persistedCheckout,
       });
 
-      await login(res.user);
+      const nextUser = {
+        ...(user || {}),
+        ...(res?.user || {}),
+        name: profileForm.name || user.name || "Customer",
+        phone: persistedCheckout.phone || user.phone || "",
+        email: user.email,
+        address: persistedCheckout.address,
+        city: persistedCheckout.city,
+        province: persistedCheckout.province,
+        zip: persistedCheckout.zip,
+      };
+      await login(nextUser);
       setEditing(false);
       Alert.alert("Saved", "Profile updated.");
     } catch (e) {
@@ -327,8 +474,7 @@ export function ProfileScreen({ navigation }) {
         )}
       </Card>
 
-      {!isAdmin ? (
-        <Card title="Delivery Address">
+      <Card title="Delivery Address">
           {editing ? (
             <>
               {[
@@ -355,19 +501,113 @@ export function ProfileScreen({ navigation }) {
               <InfoRow label="ZIP / POSTAL" value={checkoutDefaults.zip} />
             </>
           )}
-        </Card>
-      ) : null}
+      </Card>
 
-      {!isAdmin ? (
-        <Card
-          title="My Measurements"
-          hint="Use the size recommender to get personalised size suggestions on any gown."
-        >
-          <Text style={styles.emptyMeasurements}>
-            No measurements saved yet. Use the size recommender to get personalised size suggestions on any gown.
-          </Text>
-        </Card>
-      ) : null}
+      <Card title="My measurements" hint="Used by FitMatcher to recommend your size on every gown.">
+          {!measurementEditing && !hasSavedMeasurements ? (
+            <>
+              <Text style={styles.measurementHint}>No measurements saved yet. Use this recommender to get personalized size suggestions for any gown.</Text>
+              <Pressable style={styles.measurementPrimaryBtn} onPress={openMeasurementStudio}>
+                <Text style={styles.measurementPrimaryBtnText}>USE CAMERA / ENTER MEASUREMENTS →</Text>
+              </Pressable>
+              <Pressable style={styles.measurementSecondaryBtn} onPress={() => setMeasurementEditing(true)}>
+                <Text style={styles.measurementSecondaryBtnText}>ENTER MANUALLY</Text>
+              </Pressable>
+            </>
+          ) : (
+            <>
+              <View style={styles.measurementHeader}>
+                <Text style={styles.measurementHint}>Used by FitMatcher to recommend your size on every gown.</Text>
+                <View style={styles.measurementHeaderActions}>
+                  <Pressable style={styles.unitToggle} onPress={toggleMeasurementUnit}>
+                    <Text style={measurementUnit === "cm" ? styles.unitToggleActive : styles.unitToggleText}>CM</Text>
+                    <Text style={styles.unitToggleDivider}>/</Text>
+                    <Text style={measurementUnit === "in" ? styles.unitToggleActive : styles.unitToggleText}>IN</Text>
+                  </Pressable>
+                  <Pressable
+                    style={styles.editMeasureBtn}
+                    onPress={() => {
+                      if (measurementEditing) {
+                        resetMeasurementForm();
+                        setMeasurementEditing(false);
+                        return;
+                      }
+                      resetMeasurementForm();
+                      setMeasurementEditing(true);
+                    }}
+                  >
+                    <Text style={styles.editMeasureBtnText}>{measurementEditing ? "×" : "✎"}</Text>
+                  </Pressable>
+                </View>
+              </View>
+
+              {!measurementEditing ? (
+                <>
+                  <View style={styles.measurementGrid}>
+                    {[
+                      ["Bust", fittingProfile?.bust, "cm"],
+                      ["Waist", fittingProfile?.waist, "cm"],
+                      ["Hips", fittingProfile?.hips, "cm"],
+                      ["Height", fittingProfile?.height, "cm"],
+                      ["Weight", fittingProfile?.weight, "kg"],
+                    ]
+                      .filter(([, value]) => value != null && value !== "")
+                      .map(([label, value, unit]) => (
+                        <View key={label} style={styles.measurementChip}>
+                          <Text style={styles.measurementLabel}>{label}</Text>
+                          <Text style={styles.measurementValue}>
+                            {measurementValue(value, label.toLowerCase() === "weight" ? "weight" : label.toLowerCase(), measurementUnit)} {measurementUnit === "in" && unit === "kg" ? "lb" : measurementUnit === "in" ? "in" : unit}
+                          </Text>
+                        </View>
+                      ))}
+                  </View>
+
+                  <View style={styles.sourceRow}>
+                    <Text style={styles.sourceLabel}>Source</Text>
+                    <View style={styles.sourceBadge}>
+                      <Text style={styles.sourceBadgeText}>{fittingProfile?.source || "manual"}</Text>
+                    </View>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <View style={styles.measurementEditGrid}>
+                    {[
+                      ["Bust", "bust"],
+                      ["Waist", "waist"],
+                      ["Hips", "hips"],
+                      ["Height (optional)", "height"],
+                      ["Weight (optional)", "weight"],
+                    ].map(([label, key]) => (
+                      <View key={key} style={styles.measurementFieldWrap}>
+                        <Text style={styles.fieldLabel}>{label} ({key === "weight" ? (measurementUnit === "cm" ? "kg" : "lb") : measurementUnit})</Text>
+                        <TextInput
+                          style={styles.input}
+                          keyboardType="decimal-pad"
+                          value={measurementForm[key]}
+                          placeholder="0"
+                          onChangeText={(v) => setMeasurementForm((prev) => ({ ...prev, [key]: v }))}
+                        />
+                      </View>
+                    ))}
+                  </View>
+
+                  <View style={styles.editActionsRow}>
+                    <Pressable style={styles.secondaryBtn} onPress={() => {
+                      resetMeasurementForm();
+                      setMeasurementEditing(false);
+                    }}>
+                      <Text style={styles.secondaryBtnText}>CANCEL</Text>
+                    </Pressable>
+                    <Pressable style={styles.primaryBtn} onPress={onSaveMeasurements}>
+                      <Text style={styles.primaryBtnText}>SAVE MEASUREMENTS</Text>
+                    </Pressable>
+                  </View>
+                </>
+              )}
+            </>
+          )}
+      </Card>
 
       <Card title="Security" hint="Keep your account safe with a strong password.">
         {!showPassword ? (
@@ -623,6 +863,133 @@ const styles = StyleSheet.create({
   validationText: { fontSize: 13, color: "#777" },
   valid: { color: "#28a745" },
   emptyMeasurements: { fontSize: 13, color: brand.textLight, lineHeight: 20 },
+  measurementHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginBottom: 10,
+  },
+  measurementHeaderActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+  unitToggle: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: brand.border,
+    borderRadius: 8,
+    backgroundColor: brand.white,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  unitToggleText: { color: brand.textLight, fontSize: 10, fontWeight: "700" },
+  unitToggleActive: { color: BROWN, fontSize: 10, fontWeight: "800" },
+  unitToggleDivider: { color: brand.border, fontSize: 10, marginHorizontal: 4 },
+  measurementHint: {
+    flex: 1,
+    fontSize: 12,
+    color: brand.textLight,
+    lineHeight: 18,
+  },
+  measurementPrimaryBtn: {
+    marginTop: 12,
+    backgroundColor: "#C88B6A",
+    borderRadius: 999,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    alignItems: "center",
+  },
+  measurementPrimaryBtnText: {
+    color: "#fff",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  measurementSecondaryBtn: {
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: BROWN,
+    borderRadius: 999,
+    paddingVertical: 11,
+    paddingHorizontal: 16,
+    alignItems: "center",
+  },
+  measurementSecondaryBtnText: {
+    color: BROWN,
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  editMeasureBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: brand.border,
+    backgroundColor: brand.white,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  editMeasureBtnText: { fontSize: 13, color: BROWN, fontWeight: "700" },
+  measurementGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginBottom: 10,
+  },
+  measurementChip: {
+    minWidth: 88,
+    backgroundColor: "#F9F4F1",
+    borderWidth: 1,
+    borderColor: brand.border,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  measurementLabel: { fontSize: 9, color: brand.textLight, textTransform: "uppercase", letterSpacing: 0.5 },
+  measurementValue: { fontSize: 13, color: BROWN, fontWeight: "700", marginTop: 2 },
+  sourceRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 2,
+  },
+  sourceLabel: { fontSize: 11, color: brand.textLight, textTransform: "uppercase", letterSpacing: 0.4 },
+  sourceBadge: {
+    borderWidth: 1,
+    borderColor: brand.border,
+    backgroundColor: "#F8F5F1",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  sourceBadgeText: { fontSize: 10, color: BROWN, textTransform: "lowercase" },
+  measurementEditGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+  },
+  measurementFieldWrap: {
+    width: "48%",
+    marginBottom: 2,
+  },
+  editActionsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 12,
+  },
+  secondaryBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: brand.border,
+    borderRadius: 999,
+    paddingVertical: 11,
+    alignItems: "center",
+    backgroundColor: brand.white,
+  },
+  secondaryBtnText: { color: BROWN, fontSize: 11, fontWeight: "700", letterSpacing: 1 },
   outlineBtn: {
     borderWidth: 1,
     borderColor: BROWN,

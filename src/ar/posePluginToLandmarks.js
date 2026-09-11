@@ -2,6 +2,7 @@
  * ML Kit pose plugin — pixel coords in rotated image space (imageWidth × imageHeight).
  */
 import { canonicalizePoseLandmarks } from "../utils/poseCoordinateTransform";
+import { MOVENET_KEY_INDEX } from "./movenetPose";
 
 const LANDMARK_KEY_ALIASES = {
   leftShoulder: ["leftShoulderX", "leftShoulderPosition", "leftShoulder", "left_shoulder"],
@@ -54,7 +55,11 @@ function readNamedPoint(raw, names) {
 export function flattenRawPose(raw) {
   if (!raw || typeof raw !== "object") return null;
   if (raw.error) return null;
-  if (raw.pose && typeof raw.pose === "object") return raw.pose;
+  if (raw.keypoints && typeof raw.keypoints === "object") return raw;
+  if (raw.pose && typeof raw.pose === "object") {
+    if (raw.pose.keypoints && typeof raw.pose.keypoints === "object") return raw;
+    return raw.pose;
+  }
   if (Array.isArray(raw)) return raw[0] || null;
   if (raw.poses?.[0]) return raw.poses[0];
   if (raw.landmarks && typeof raw.landmarks === "object") return raw.landmarks;
@@ -117,6 +122,34 @@ function toNormalized(p, imgW, imgH) {
 function buildLandmarksRaw(flat, imgW, imgH) {
   const out = {};
 
+  const nativeKeypoints =
+    flat?.keypoints && typeof flat.keypoints === "object"
+      ? flat.keypoints
+      : flat?.pose?.keypoints && typeof flat.pose.keypoints === "object"
+        ? flat.pose.keypoints
+        : null;
+
+  if (nativeKeypoints) {
+    for (const [name, point] of Object.entries(nativeKeypoints)) {
+      if (!point || typeof point !== "object") continue;
+      const x = Number(point.x ?? 0);
+      const y = Number(point.y ?? 0);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const normalized = isLikelyNormalized({ x, y, score: point.score ?? 1 })
+        ? { x, y, score: point.score ?? 1 }
+        : toNormalized({ x, y, score: point.score ?? 1 }, imgW, imgH);
+
+      const idx = Number(name);
+      let targetName = null;
+      if (Object.prototype.hasOwnProperty.call(MOVENET_KEY_INDEX, name)) {
+        targetName = name;
+      } else if (Number.isInteger(idx) && idx >= 0 && idx < 17) {
+        targetName = Object.keys(MOVENET_KEY_INDEX).find((k) => MOVENET_KEY_INDEX[k] === idx) || null;
+      }
+      if (targetName) out[targetName] = normalized;
+    }
+  }
+
   for (const [name, aliases] of Object.entries(LANDMARK_KEY_ALIASES)) {
     const p = readNamedPoint(flat, aliases);
     if (p) out[name] = toNormalized(p, imgW, imgH);
@@ -143,17 +176,81 @@ function buildLandmarksRaw(flat, imgW, imgH) {
   return out;
 }
 
+export const WEB_POSE_INDEX_MAP = {
+  0: "nose",
+  5: "leftShoulder",
+  6: "rightShoulder",
+  11: "leftHip",
+  12: "rightHip",
+  13: "leftKnee",
+  14: "rightKnee",
+  15: "leftAnkle",
+  16: "rightAnkle",
+};
+
+export function poseKeypointsToWebArray(lm, imageWidth = 720, imageHeight = 1280) {
+  if (!lm) return Array(17).fill(null);
+
+  const out = Array(17).fill(null);
+  const setPoint = (index, point) => {
+    if (index < 0 || index >= out.length || !point) return;
+    const x = Number(point.x ?? point.X ?? 0);
+    const y = Number(point.y ?? point.Y ?? 0);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    const isNormalized = x >= 0 && x <= 1.5 && y >= 0 && y <= 1.5;
+    out[index] = {
+      x: isNormalized ? x * imageWidth : x,
+      y: isNormalized ? y * imageHeight : y,
+      score: Number(point.score ?? point.confidence ?? 1),
+    };
+  };
+
+  Object.entries(WEB_POSE_INDEX_MAP).forEach(([index, name]) => {
+    const point = lm[name] || lm[Number(index)];
+    setPoint(Number(index), point);
+  });
+
+  return out;
+}
+
 /**
  * Measurements + overlay source. Landmarks are portrait-up, not mirrored.
  * Mirror for display via toDisplayLandmarks().
  */
+function buildLandmarksFromPreMapped(preMapped) {
+  const names = [
+    "nose",
+    "leftShoulder",
+    "rightShoulder",
+    "leftHip",
+    "rightHip",
+    "leftKnee",
+    "rightKnee",
+    "leftAnkle",
+    "rightAnkle",
+  ];
+  const out = {};
+  for (const name of names) {
+    const p = preMapped?.[name];
+    if (!p || typeof p.x !== "number" || typeof p.y !== "number") continue;
+    out[name] = {
+      x: Math.max(0, Math.min(1, p.x)),
+      y: Math.max(0, Math.min(1, p.y)),
+      score: p.score ?? 1,
+    };
+  }
+  if (!out.leftShoulder || !out.rightShoulder) return null;
+  return out;
+}
+
 export function parsePosePayload(payload, { fallbackW = 720, fallbackH = 1280 } = {}) {
   if (!payload || payload.error) return null;
   const flat = flattenRawPose(payload);
   if (!flat || !hasPosePluginData(payload)) return null;
 
   const { width: imgW, height: imgH } = resolvePoseImageSize(flat, fallbackW, fallbackH);
-  const rawLm = buildLandmarksRaw(flat, imgW, imgH);
+  const preMapped = flat?.pose?.leftShoulder ? flat.pose : null;
+  const rawLm = preMapped ? buildLandmarksFromPreMapped(preMapped) : buildLandmarksRaw(flat, imgW, imgH);
   if (!rawLm) return null;
 
   const { landmarks, imageWidth, imageHeight } = canonicalizePoseLandmarks(rawLm, imgW, imgH);
@@ -169,6 +266,11 @@ export function hasPosePluginData(raw) {
   if (!raw || raw.error) return false;
   const flat = flattenRawPose(raw);
   if (!flat) return false;
+
+  if (flat.keypoints && typeof flat.keypoints === "object") return true;
+  if (flat.pose?.keypoints && typeof flat.pose.keypoints === "object") return true;
+  if (flat.pose?.leftShoulder && flat.pose?.rightShoulder) return true;
+
   return Boolean(
     flat.leftShoulderPosition ||
       flat.rightShoulderPosition ||

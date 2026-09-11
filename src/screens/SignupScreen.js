@@ -1,6 +1,6 @@
 import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useMemo, useState, useRef, useEffect } from "react";
-import { verifyLoginOtp, sendOtpRemote } from "../services/auth";
+import { verifyLoginOtp, sendLoginOtp } from "../services/auth";
 import { useShop } from "../context/ShopContext";
 import { checkEmailTaken, getUserByEmail, registerUser } from "../services/authLocal";
 import { getPasswordRuleChecks, validateSignupForm } from "../utils/authValidation";
@@ -110,7 +110,7 @@ export function SignupScreen({ navigation }) {
         return;
       }
 
-      const otpResult = await sendOtpRemote(cleanEmail, "signup");
+      const otpResult = await sendLoginOtp(cleanEmail, "signup");
       if (!otpResult.ok) {
         const message = otpResult.error || "Failed to send verification code.";
         if (message.toLowerCase().includes("already exists")) {
@@ -128,7 +128,12 @@ export function SignupScreen({ navigation }) {
       // we assume success means an email was sent. Start resend timer.
       setStep(2);
       startResendCountdown(30);
-      Alert.alert("Verification sent", "A verification code has been sent to your email.");
+      Alert.alert(
+        "Verification sent",
+        otpResult.devMode && otpResult.otp
+          ? `Use this verification code: ${otpResult.otp}`
+          : "A verification code has been sent to your email."
+      );
     } catch (e) {
       Alert.alert("Signup error", e.message || "Failed to send verification code.");
     } finally {
@@ -306,10 +311,13 @@ export function SignupScreen({ navigation }) {
               if (resendSeconds) return;
               setLoading(true);
               try {
-                const r = await sendOtpRemote(form.email.trim(), 'signup');
+                const r = await sendLoginOtp(form.email.trim(), 'signup');
                 if (!r.ok) throw new Error(r.error || 'Unable to resend code.');
                 startResendCountdown(30);
-                Alert.alert('Verification sent', 'A new code has been sent to your email.');
+                Alert.alert(
+                  'Verification sent',
+                  r.devMode && r.otp ? `Use this verification code: ${r.otp}` : 'A new code has been sent to your email.'
+                );
               } catch (e) {
                 Alert.alert('Resend failed', e.message || 'Unable to resend code.');
               } finally {

@@ -61,7 +61,8 @@ export async function syncUserData(payload) {
     const msg = await res.text();
     return { ok: false, skipped: false, reason: msg || `Sync failed (${res.status})` };
   }
+  const data = await res.json().catch(() => ({}));
   const now = new Date().toISOString();
   await AsyncStorage.setItem(LAST_SYNC_AT_KEY, now);
-  return { ok: true, lastSyncedAt: now };
+  return { ok: true, data, lastSyncedAt: now };
 }

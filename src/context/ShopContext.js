@@ -184,8 +184,10 @@ export function ShopProvider({ children }) {
     if (!normalizedId) return { ok: false, reason: "Invalid item." };
 
     try {
+      const email = String(user?.email || "").trim().toLowerCase();
+
       // Guest: local-only cart (sync later on login)
-      if (!user?.email) {
+      if (!email) {
         const size = options?.size == null || options?.size === "" ? null : String(options.size).trim();
         const gown = gowns.find((g) => normalizeId(g?.id) === normalizedId);
         const available = gown ? sizeStockAvailable(gown, size) : null;
@@ -205,7 +207,6 @@ export function ShopProvider({ children }) {
         return { ok: true, cart: next, localOnly: true };
       }
 
-      const email = String(user.email).trim().toLowerCase();
       const result = await addItemToCart(email, normalizedId, quantity, cart, gowns, options);
       if (result.ok) {
         setCart(result.cart);
@@ -224,7 +225,8 @@ export function ShopProvider({ children }) {
       const normalizedId = normalizeId(id);
       if (!normalizedId) return { ok: false, reason: "Invalid item." };
 
-      if (!user?.email) {
+      const email = String(user?.email || "").trim().toLowerCase();
+      if (!email) {
         const gown = gowns.find((g) => normalizeId(g?.id) === normalizedId);
         const available = sizeStockAvailable(gown, size);
         const safeQty = Math.max(1, Number(qty) || 1);
@@ -236,7 +238,6 @@ export function ShopProvider({ children }) {
         return { ok: true, cart: next, qty: cappedQty, localOnly: true };
       }
 
-      const email = String(user.email).trim().toLowerCase();
       const result = await updateCartItemQty(email, normalizedId, qty, cart, gowns, size);
       if (result.ok) {
         setCart(result.cart);
@@ -273,7 +274,8 @@ export function ShopProvider({ children }) {
         return { ok: false, reason: "That size is out of stock" };
       }
 
-      if (!user?.email) {
+      const email = String(user?.email || "").trim().toLowerCase();
+      if (!email) {
         const cartNorm = normalizeCartItems(cart);
         const fromLine = findCartLine(cartNorm, normalizedId, fromKey);
         if (!fromLine) return { ok: false, reason: "Item not in cart" };
@@ -303,7 +305,6 @@ export function ShopProvider({ children }) {
         };
       }
 
-      const email = String(user.email).trim().toLowerCase();
       const result = await changeCartItemSize(email, normalizedId, fromKey, toKey, cart, gowns);
       if (result.ok) {
         setCart(result.cart);
@@ -321,7 +322,8 @@ export function ShopProvider({ children }) {
       const normalizedId = normalizeId(id);
       if (!normalizedId) return { ok: false, reason: "Invalid item." };
 
-      if (!user?.email) {
+      const email = String(user?.email || "").trim().toLowerCase();
+      if (!email) {
         const key = `${normalizedId}__${size == null ? "" : String(size).trim()}`;
         const next = normalizeCartItems(cart).filter((i) => i.lineKey !== key);
         setCart(next);
@@ -329,7 +331,6 @@ export function ShopProvider({ children }) {
         return { ok: true, cart: next, localOnly: true };
       }
 
-      const email = String(user.email).trim().toLowerCase();
       const result = await removeItemFromCart(email, normalizedId, cart, size);
       if (result.ok) {
         setCart(result.cart);
@@ -343,15 +344,16 @@ export function ShopProvider({ children }) {
   };
 
   const clearCart = async () => {
-    if (user?.email) {
+    const email = String(user?.email || "").trim().toLowerCase();
+    if (email) {
       try {
-        await clearCartOnServer(String(user.email).trim().toLowerCase());
+        await clearCartOnServer(email);
       } catch (err) {
         console.warn("Failed to clear cart on server:", err);
       }
     }
     setCart([]);
-    await saveCart([], user?.email ? String(user.email).trim().toLowerCase() : undefined);
+    await saveCart([], email || undefined);
   };
 
   const removePurchasedLines = async (lineKeys = []) => {
@@ -361,8 +363,8 @@ export function ShopProvider({ children }) {
     const keySet = new Set(keys);
     const nextCart = normalizeCartItems(cart).filter((item) => !keySet.has(item.lineKey));
 
-    if (user?.email) {
-      const email = String(user.email).trim().toLowerCase();
+    const email = String(user?.email || "").trim().toLowerCase();
+    if (email) {
       const saveResult = await saveCartToServer(email, nextCart);
       if (!saveResult?.ok) {
         return { ok: false, reason: saveResult?.reason || "Failed to update cart on server" };
@@ -456,14 +458,34 @@ export function ShopProvider({ children }) {
 
   const syncNow = async () => {
     if (!user?.email) return { ok: false, reason: "Please sign in first." };
+    const profile = {
+      id: user.id,
+      firstName: user.firstName || String(user.name || "").trim().split(/\s+/)[0] || "",
+      lastName: user.lastName || String(user.name || "").trim().split(/\s+/).slice(1).join(" ") || "",
+      name: user.name || "",
+      email: String(user.email).trim().toLowerCase(),
+      phone: user.phone || user.phoneNumber || "",
+      address: user.address || "",
+      city: user.city || "",
+      province: user.province || "",
+      zip: user.zip || "",
+      role: user.role || "customer",
+    };
     const result = await syncUserData({
-      user,
+      email: profile.email,
+      profile,
       cart,
       favoritesIds,
       syncedAt: new Date().toISOString(),
     });
     if (result?.ok && result?.lastSyncedAt) {
       setLastSyncedAt(result.lastSyncedAt);
+    }
+    const remoteUser = result?.data?.user || result?.data?.profile;
+    if (result?.ok && remoteUser && typeof remoteUser === "object") {
+      const mergedUser = { ...user, ...remoteUser, email: profile.email };
+      setUser(mergedUser);
+      await saveUser(mergedUser);
     }
     return result;
   };

@@ -34,10 +34,9 @@ export function FittingTryOnPanel({ initialGownId }) {
   return (
     <View style={styles.wrap}>
       <ScrollView style={styles.panel} contentContainerStyle={styles.panelContent}>
-        <Text style={styles.title}>Virtual try-on</Text>
+        <Text style={styles.title}>Virtual Try-On</Text>
         <Text style={styles.hint}>
-          Open the AR camera to see gowns overlaid on your pose — same try-on as the website fitting room.
-          {user?.id ? " Captures can be saved to your profile." : " Sign in to save try-ons."}
+          Pick a gown, open the AR camera, and see how it fits. Same experience as the web fitting room.
         </Text>
 
         {selectedGown ? (
@@ -49,7 +48,7 @@ export function FittingTryOnPanel({ initialGownId }) {
         ) : null}
 
         <Pressable style={styles.primaryBtn} onPress={openTryOn}>
-          <Text style={styles.primaryText}>Open AR try-on camera</Text>
+          <Text style={styles.primaryText}>→ Open AR Camera</Text>
         </Pressable>
 
         <Text style={styles.label}>Choose a {catalogLabel}</Text>

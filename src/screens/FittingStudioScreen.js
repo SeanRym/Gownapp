@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { FittingProvider, useFitting } from "../context/FittingContext";
+import { useFitting } from "../context/FittingContext";
 import { FittingProfileSheet } from "../components/fitting/FittingProfileSheet";
 import { fetchCmsSection } from "../services/cms";
 import { brand } from "../theme/brand";
@@ -100,11 +100,7 @@ export function FittingStudioInner({ route, navigation }) {
 }
 
 export function FittingStudioScreen(props) {
-  return (
-    <FittingProvider>
-      <FittingStudioInner {...props} />
-    </FittingProvider>
-  );
+  return <FittingStudioInner {...props} />;
 }
 
 const styles = StyleSheet.create({

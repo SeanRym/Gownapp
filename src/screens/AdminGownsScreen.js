@@ -85,8 +85,12 @@ export function AdminGownsScreen() {
             Object.entries(form.sizeInventory).map(([k, v]) => [String(k || "").trim(), Math.max(0, Number(v) || 0)])
           )
         : {};
+    const salePrice = Number(String(form?.price || "").replace(/[^\d.]/g, "")) || 0;
     return {
       ...form,
+      sku: form?.id ? String(form.id) : undefined,
+      salePrice,
+      price: salePrice || String(form?.price || "").trim(),
       tryonImage: String(form.tryonImage || "").trim(),
       tryonImageBack: String(form.tryonImageBack || "").trim(),
       tryonCalibration: form.tryonCalibration || null,
@@ -94,6 +98,7 @@ export function AdminGownsScreen() {
         .map((x) => String(x || "").trim())
         .filter(Boolean),
       sizeInventory: parsedSizeInventory,
+      lowStockThreshold: Number(form?.lowStockThreshold || 0) || 0,
     };
   };
 
@@ -714,20 +719,34 @@ export function AdminGownsScreen() {
               <Text style={styles.sectionLabel}>Basic info</Text>
         <TextInput style={styles.input} placeholder="ID (optional for edit)" value={String(form.id)} onChangeText={(v) => setForm((p) => ({ ...p, id: v }))} autoCapitalize="none" />
               <View style={styles.splitRow}>
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Name" value={form.name} onChangeText={(v) => setForm((p) => ({ ...p, name: v }))} />
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Price" value={form.price} onChangeText={(v) => setForm((p) => ({ ...p, price: v }))} />
+                <TextInput
+                  style={[styles.input, styles.splitInput]}
+                  placeholder="e.g. Isabella"
+                  value={form.name}
+                  onChangeText={(v) => setForm((p) => ({ ...p, name: v }))}
+                />
+                <View style={[styles.pesoInputWrap, styles.splitInput]}>
+                  <Text style={styles.pesoPrefix}>₱</Text>
+                  <TextInput
+                    style={styles.pesoInput}
+                    placeholder="e.g. 6499"
+                    value={form.price}
+                    onChangeText={(v) => setForm((p) => ({ ...p, price: v }))}
+                    keyboardType="numeric"
+                  />
+                </View>
               </View>
               <View style={styles.splitRow}>
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Type" value={form.type} onChangeText={(v) => setForm((p) => ({ ...p, type: v }))} />
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Color" value={form.color} onChangeText={(v) => setForm((p) => ({ ...p, color: v }))} />
+                <TextInput style={[styles.input, styles.splitInput]} placeholder="Gowns" value={form.type} onChangeText={(v) => setForm((p) => ({ ...p, type: v }))} />
+                <TextInput style={[styles.input, styles.splitInput]} placeholder="e.g. Ivory" value={form.color} onChangeText={(v) => setForm((p) => ({ ...p, color: v }))} />
               </View>
               <View style={styles.splitRow}>
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Silhouette" value={form.silhouette} onChangeText={(v) => setForm((p) => ({ ...p, silhouette: v }))} />
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Fabric" value={form.fabric} onChangeText={(v) => setForm((p) => ({ ...p, fabric: v }))} />
+                <TextInput style={[styles.input, styles.splitInput]} placeholder="e.g. A-line" value={form.silhouette} onChangeText={(v) => setForm((p) => ({ ...p, silhouette: v }))} />
+                <TextInput style={[styles.input, styles.splitInput]} placeholder="e.g. Satin" value={form.fabric} onChangeText={(v) => setForm((p) => ({ ...p, fabric: v }))} />
               </View>
               <View style={styles.splitRow}>
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Neckline" value={form.neckline} onChangeText={(v) => setForm((p) => ({ ...p, neckline: v }))} />
-                <TextInput style={[styles.input, styles.splitInput]} placeholder="Alt text" value={form.alt} onChangeText={(v) => setForm((p) => ({ ...p, alt: v }))} />
+                <TextInput style={[styles.input, styles.splitInput]} placeholder="e.g. V-neck" value={form.neckline} onChangeText={(v) => setForm((p) => ({ ...p, neckline: v }))} />
+                <TextInput style={[styles.input, styles.splitInput]} placeholder="Short image description" value={form.alt} onChangeText={(v) => setForm((p) => ({ ...p, alt: v }))} />
               </View>
         <View style={styles.promoRow}>
           <View style={styles.promoLeft}>
@@ -1128,11 +1147,88 @@ const styles = StyleSheet.create({
   },
   splitRow: { flexDirection: "row", gap: 8 },
   splitInput: { flex: 1 },
+  pesoInputWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: brand.border,
+    borderRadius: 8,
+    backgroundColor: brand.white,
+    paddingHorizontal: 10,
+    minHeight: 42,
+  },
+  pesoPrefix: {
+    color: brand.textLight,
+    fontSize: 16,
+    fontWeight: "700",
+    marginRight: 6,
+  },
+  pesoInput: {
+    flex: 1,
+    minHeight: 38,
+    color: brand.text,
+    fontSize: 15,
+    paddingVertical: 8,
+  },
   modalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8, marginTop: 10 },
   modalCancelBtn: { borderWidth: 1, borderColor: brand.border, backgroundColor: brand.white, borderRadius: 6, paddingVertical: 9, paddingHorizontal: 14 },
   modalCancelText: { color: brand.textLight, fontWeight: "700", fontSize: 11 },
   modalSaveBtn: { borderRadius: 6, backgroundColor: "#9b6d28", paddingVertical: 9, paddingHorizontal: 14 },
   modalSaveText: { color: brand.white, fontWeight: "800", fontSize: 11 },
+  bgModalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", alignItems: "center", justifyContent: "center", padding: 18 },
+  bgModalCard: { width: "100%", maxWidth: 420, backgroundColor: "#f5f3f0", borderRadius: 14, overflow: "hidden", borderWidth: 1, borderColor: "#d7d0cb" },
+  bgModalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: "#ddd4ce", backgroundColor: "#f0eee9" },
+  bgModalTitle: { color: brand.dark, fontSize: 17, fontWeight: "800" },
+  bgModalClose: { color: brand.dark, fontSize: 22, fontWeight: "700", lineHeight: 22 },
+  bgModalBody: { padding: 16 },
+  bgModalText: { color: "#5a514d", fontSize: 12, lineHeight: 18, marginBottom: 14 },
+  bgPreviewShell: {
+    height: 260,
+    borderWidth: 1,
+    borderColor: "#d8d1ca",
+    borderRadius: 8,
+    backgroundColor: "#f3f3f3",
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    marginBottom: 14,
+    backgroundImage: "none",
+  },
+  bgPreviewImage: { width: "100%", height: "100%", backgroundColor: "#ece5df" },
+  bgPreviewEmpty: { width: "100%", height: "100%", backgroundColor: "#efefef", alignItems: "center", justifyContent: "center" },
+  bgPreviewEmptyText: { color: brand.textLight, fontSize: 12 },
+  bgSliderWrap: { marginBottom: 18 },
+  bgSliderLabel: { color: brand.dark, fontSize: 12, fontWeight: "700", marginBottom: 8 },
+  bgSliderRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  bgSliderValue: { width: 30, color: brand.dark, fontSize: 12, fontWeight: "700", textAlign: "center" },
+  bgSliderTrack: {
+    position: "relative",
+    flex: 1,
+    height: 8,
+    borderRadius: 999,
+    backgroundColor: "#ddd6cf",
+    overflow: "hidden",
+    justifyContent: "center",
+  },
+  bgSliderFill: { position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: 999, backgroundColor: "#b77d46" },
+  bgSliderThumb: {
+    position: "absolute",
+    top: -4,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: "#fff",
+    borderWidth: 2,
+    borderColor: "#a97439",
+    transform: [{ translateX: -8 }],
+  },
+  bgSliderRunBtn: { paddingHorizontal: 10, paddingVertical: 7, borderRadius: 6, borderWidth: 1, borderColor: brand.border, backgroundColor: "#f4f0eb" },
+  bgSliderRunText: { color: brand.dark, fontWeight: "700", fontSize: 11 },
+  bgModalActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 },
+  bgModalCancelBtn: { borderWidth: 1, borderColor: brand.border, backgroundColor: "#f5f4f3", borderRadius: 8, paddingVertical: 9, paddingHorizontal: 14 },
+  bgModalCancelText: { color: brand.dark, fontWeight: "700", fontSize: 11 },
+  bgModalSaveBtn: { borderRadius: 8, backgroundColor: "#a96e2d", paddingVertical: 9, paddingHorizontal: 14 },
+  bgModalSaveText: { color: brand.white, fontWeight: "800", fontSize: 11 },
   inventoryHeadRow: {
     flexDirection: "row",
     alignItems: "center",

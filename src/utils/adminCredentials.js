@@ -106,17 +106,36 @@ export async function pingAdminApi({ force = false } = {}) {
 
   const url = `${String(API_BASE_URL).replace(/\/+$/, "")}/api/admin/ping`;
   try {
-    const r = await fetch(url, { headers: adminAuthHeaders() });
-    const body = await r.json().catch(() => ({}));
+    let r;
+    try {
+      r = await fetch(url, { headers: adminAuthHeaders() });
+    } catch (fetchErr) {
+      pingCache = { ok: false, at: now, secretKey: key };
+      return { ok: false, error: fetchErr?.message || "Network error", status: null, cached: false };
+    }
+
+    if (!r) {
+      pingCache = { ok: false, at: now, secretKey: key };
+      return { ok: false, error: "No response from server", status: null, cached: false };
+    }
+
+    const status = Number(r.status) || 0;
+    let body = {};
+    try {
+      body = await r.json();
+    } catch {
+      body = {};
+    }
+
     const ok = r.ok && body?.ok === true;
-    if (r.status === 401) {
+    if (status === 401) {
       await saveAdminSecret("");
     }
     pingCache = { ok, at: now, secretKey: key };
-    return { ok, status: r.status, cached: false };
+    return { ok, status, cached: false };
   } catch (e) {
     pingCache = { ok: false, at: now, secretKey: key };
-    return { ok: false, error: e?.message || "Network error", cached: false };
+    return { ok: false, error: e?.message || "Validation error", status: null, cached: false };
   }
 }
 

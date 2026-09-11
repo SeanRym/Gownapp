@@ -1,6 +1,7 @@
 import { API_BASE_URL } from "../config/apiEnv";
 import { recommendSize } from "../constants/sizeConstants";
 import { scoreGown, normaliseScore } from "../constants/styleOptions";
+import { loadArFitProfiles, saveArFitProfiles } from "../utils/storage";
 
 function makeUrl(path) {
   return `${String(API_BASE_URL).replace(/\/+$/, "")}${path}`;
@@ -17,28 +18,61 @@ async function requestJson(path, options = {}) {
 
 export async function fetchMeasurements(userId) {
   if (!userId) return null;
-  const data = await requestJson("/api/measurements", {
-    headers: { "x-user-id": String(userId) },
-  });
-  return data?.measurements || null;
+  const profiles = await loadArFitProfiles();
+  const localMeasurements = profiles?.[String(userId)] || null;
+  const hasValues = (record) =>
+    record && ["bust_cm", "waist_cm", "hips_cm", "height_cm", "weight_kg", "bust", "waist", "hips", "height", "weight"]
+      .some((key) => Number(record[key]) > 0);
+  try {
+    const data = await requestJson("/api/measurements", {
+      headers: { "x-user-id": String(userId) },
+    });
+    const remoteMeasurements = data?.measurements;
+    if (!hasValues(remoteMeasurements)) return localMeasurements;
+    const remoteTime = Date.parse(remoteMeasurements.updatedAt || remoteMeasurements.updated_at || "");
+    const localTime = Date.parse(localMeasurements?.updatedAt || localMeasurements?.updated_at || "");
+    return localTime > remoteTime && hasValues(localMeasurements) ? localMeasurements : remoteMeasurements;
+  } catch {
+    return localMeasurements;
+  }
 }
 
 export async function saveMeasurements(userId, payload) {
   if (!userId) throw new Error("Sign in required.");
-  const data = await requestJson("/api/measurements", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-user-id": String(userId) },
-    body: JSON.stringify({ ...payload, source: payload?.source || "manual" }),
-  });
-  return data?.measurements;
+  const measurements = {
+    ...(payload || {}),
+    source: payload?.source || "manual",
+    updatedAt: new Date().toISOString(),
+  };
+  const profiles = await loadArFitProfiles();
+  await saveArFitProfiles({ ...(profiles || {}), [String(userId)]: measurements });
+  try {
+    const data = await requestJson("/api/measurements", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-user-id": String(userId) },
+      body: JSON.stringify(measurements),
+    });
+    return data?.measurements || measurements;
+  } catch {
+    return measurements;
+  }
 }
 
 export async function clearMeasurements(userId) {
   if (!userId) return;
-  await requestJson("/api/measurements", {
-    method: "DELETE",
-    headers: { "x-user-id": String(userId) },
-  });
+  try {
+    await requestJson("/api/measurements", {
+      method: "DELETE",
+      headers: { "x-user-id": String(userId) },
+    });
+  } catch {
+    // The deployed web API may not expose this route yet; clear the mobile copy below.
+  } finally {
+    const profiles = await loadArFitProfiles();
+    const next = { ...(profiles || {}) };
+    delete next[String(userId)];
+    await saveArFitProfiles(next);
+  }
 }
 
 export async function fetchSizeChart(segment = "women") {
@@ -74,17 +108,21 @@ export async function fetchStylePrefs(userId) {
 
 export async function saveStylePreferences(userId, profile) {
   if (!userId) throw new Error("Sign in required.");
-  await requestJson("/api/auth/save-style-prefs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-user-id": String(userId) },
-    body: JSON.stringify({
-      bodyType: profile?.bodyShape || null,
-      skinTone: profile?.skinTone || null,
-      styleTags: profile?.occasion ? [profile.occasion] : [],
-      preferredSilhouettes: [],
-      preferredColors: Array.isArray(profile?.colors) ? profile.colors : [],
-    }),
-  });
+  try {
+    await requestJson("/api/auth/save-style-prefs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-user-id": String(userId) },
+      body: JSON.stringify({
+        bodyType: profile?.bodyShape || null,
+        skinTone: profile?.skinTone || null,
+        styleTags: profile?.occasion ? [profile.occasion] : [],
+        preferredSilhouettes: [],
+        preferredColors: Array.isArray(profile?.colors) ? profile.colors : [],
+      }),
+    });
+  } catch {
+    // Measurements remain usable locally if this optional web route is unavailable.
+  }
 }
 
 export async function saveTryonSnapshot(userId, { image, gownId, gownName }) {

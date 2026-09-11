@@ -23,7 +23,7 @@ export async function fetchCartSnapshotFromServer(userEmail) {
       method: "GET",
       headers: {
         "Content-Type": "application/json",
-        "X-User-Email": userEmail,
+        "X-User-Email": cleanEmail,
       },
     });
 
@@ -55,7 +55,11 @@ export async function fetchCartFromServer(userEmail) {
  */
 export async function saveCartToServer(userEmail, cartItems) {
   try {
-    if (!userEmail) return { ok: false, reason: "User not authenticated" };
+    const cleanEmail = String(userEmail || "").trim().toLowerCase();
+    if (!cleanEmail) {
+      console.warn("Cart sync skipped because user email is missing; using local-only cart.");
+      return { ok: true, data: { local: true } };
+    }
 
     const items = normalizeCartItems(cartItems).map(({ id, qty, size }) => ({
       id,
@@ -67,7 +71,7 @@ export async function saveCartToServer(userEmail, cartItems) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-User-Email": userEmail,
+        "X-User-Email": cleanEmail,
       },
       body: JSON.stringify({
         items,
@@ -76,8 +80,8 @@ export async function saveCartToServer(userEmail, cartItems) {
     });
 
     if (!res.ok) {
-      if (res.status === 404) {
-        console.warn("Cart sync endpoint not available, using local storage only");
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        console.warn(`Cart sync unavailable (${res.status}), using local storage only`);
         return { ok: true, data: { local: true } };
       }
       const msg = await res.text();

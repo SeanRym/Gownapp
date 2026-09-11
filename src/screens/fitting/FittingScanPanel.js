@@ -15,7 +15,7 @@ import Constants, { ExecutionEnvironment } from "expo-constants";
 import { useCameraPermissions } from "expo-camera";
 import { captureRef } from "react-native-view-shot";
 import ViewShot from "react-native-view-shot";
-import { NativePoseCamera } from "../../ar/NativePoseCamera";
+import { MoveNetPoseCamera } from "../../ar/MoveNetPoseCamera";
 import { posePluginToLandmarks } from "../../ar/posePluginToLandmarks";
 import { FittingPoseOverlay } from "../../components/fitting/FittingPoseOverlay";
 import { ScanSnapshotModal } from "../../components/fitting/ScanSnapshotModal";
@@ -38,9 +38,26 @@ import { brand } from "../../theme/brand";
 
 const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient;
 const canUseNativePose = Platform.OS !== "web" && !isExpoGo;
+const CM_PER_INCH = 2.54;
+const KG_PER_POUND = 0.45359237;
+
+function toDisplayUnit(value, field, unit) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  const converted = unit === "in"
+    ? number / (field === "weight" ? KG_PER_POUND : CM_PER_INCH)
+    : number;
+  return converted.toFixed(1);
+}
+
+function toMetric(value, field, unit) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return unit === "in" ? number * (field === "weight" ? KG_PER_POUND : CM_PER_INCH) : number;
+}
 
 export function FittingScanPanel() {
-  const { profile, updateProfile, applyMeasurements } = useFitting();
+  const { profile, updateProfile, applyMeasurements, saveProfile } = useFitting();
   const scanSession = useRef(createFittingScanSession()).current;
   const viewShotRef = useRef(null);
   const videoDims = useRef({ width: 720, height: 1280 });
@@ -76,6 +93,7 @@ export function FittingScanPanel() {
   const [mHeight, setMHeight] = useState("");
   const [mWeight, setMWeight] = useState("");
   const [mErrors, setMErrors] = useState({});
+  const [scanUnit, setScanUnit] = useState("cm");
 
   const segLabel = SEGMENTS.find((s) => s.id === profile.segment)?.label || "Women";
   const hasHeight = profile.height != null && profile.height > 0;
@@ -88,6 +106,21 @@ export function FittingScanPanel() {
     bust: MEAS_VARIANCE.bust[variantKey],
     waist: MEAS_VARIANCE.waist[variantKey],
     hip: MEAS_VARIANCE.hip[variantKey],
+  };
+
+  const toggleScanUnit = () => {
+    const nextUnit = scanUnit === "cm" ? "in" : "cm";
+    const convert = (value, field) => toDisplayUnit(toMetric(value, field, scanUnit), field, nextUnit);
+    setAdjBust((value) => convert(value, "bust"));
+    setAdjWaist((value) => convert(value, "waist"));
+    setAdjHips((value) => convert(value, "hips"));
+    setMBust((value) => convert(value, "bust"));
+    setMWaist((value) => convert(value, "waist"));
+    setMHips((value) => convert(value, "hips"));
+    setMHeight((value) => convert(value, "height"));
+    setMWeight((value) => convert(value, "weight"));
+    setHeightInput((value) => convert(value, "height"));
+    setScanUnit(nextUnit);
   };
 
   const hudText = (() => {
@@ -181,7 +214,7 @@ export function FittingScanPanel() {
 
   const startScan = async () => {
     if (heightInput.trim()) {
-      const h = parseFloat(heightInput);
+      const h = toMetric(heightInput, "height", scanUnit);
       if (h >= 100 && h <= 250) updateProfile({ height: h });
     }
     if (!permission?.granted) {
@@ -210,9 +243,9 @@ export function FittingScanPanel() {
     if (!canLock) return;
     const lockedMeas = scanSession.lockMeasurements(profile);
     if (!lockedMeas) return;
-    setAdjBust(String(lockedMeas.bust));
-    setAdjWaist(String(lockedMeas.waist));
-    setAdjHips(String(lockedMeas.hips));
+    setAdjBust(toDisplayUnit(lockedMeas.bust, "bust", scanUnit));
+    setAdjWaist(toDisplayUnit(lockedMeas.waist, "waist", scanUnit));
+    setAdjHips(toDisplayUnit(lockedMeas.hips, "hips", scanUnit));
     setScanConf(confidence);
     setLocked(true);
     stopScan();
@@ -240,25 +273,28 @@ export function FittingScanPanel() {
     setAdjHips("");
   };
 
-  const confirmMeasurements = () => {
-    applyMeasurements(
-      {
-        bust: parseFloat(adjBust) || null,
-        waist: parseFloat(adjWaist) || null,
-        hips: parseFloat(adjHips) || null,
-        bodyShape: detectedShape || profile.bodyShape,
-      },
-      "camera"
-    );
-    if (detectedTone) updateProfile({ skinTone: detectedTone.skinTone, undertone: detectedTone.undertone });
-    Alert.alert("Applied", "Measurements saved to your fitting profile.");
+  const confirmMeasurements = async () => {
+    const patch = {
+      bust: toMetric(adjBust, "bust", scanUnit),
+      waist: toMetric(adjWaist, "waist", scanUnit),
+      hips: toMetric(adjHips, "hips", scanUnit),
+      bodyShape: detectedShape || profile.bodyShape,
+      skinTone: detectedTone?.skinTone || profile.skinTone,
+      undertone: detectedTone?.undertone || profile.undertone,
+      source: "camera",
+    };
+    const nextProfile = { ...profile, ...patch };
+    applyMeasurements(patch, "camera");
+    const result = await saveProfile(nextProfile);
+    if (result?.ok) Alert.alert("Saved", "Measurements saved to your fitting profile.");
+    else Alert.alert("Save failed", result?.error || "Unable to save your measurements.");
   };
 
-  const confirmManual = () => {
+  const confirmManual = async () => {
     const fields = { bust: mBust, waist: mWaist, hips: mHips, height: mHeight, weight: mWeight };
     const errors = {};
     for (const [k, v] of Object.entries(fields)) {
-      const err = validateMeasurementField(k, v);
+      const err = validateMeasurementField(k, toMetric(v, k, scanUnit));
       if (err) errors[k] = err;
     }
     if (!mBust && !mWaist && !mHips) {
@@ -270,36 +306,44 @@ export function FittingScanPanel() {
       return;
     }
     setMErrors({});
-    applyMeasurements(
-      {
-        bust: parseFloat(mBust) || null,
-        waist: parseFloat(mWaist) || null,
-        hips: parseFloat(mHips) || null,
-      },
-      "manual"
-    );
-    updateProfile({
-      height: parseFloat(mHeight) || null,
-      weight: parseFloat(mWeight) || null,
-    });
-    Alert.alert("Applied", "Measurements saved to your fitting profile.");
+    const patch = {
+      bust: toMetric(mBust, "bust", scanUnit),
+      waist: toMetric(mWaist, "waist", scanUnit),
+      hips: toMetric(mHips, "hips", scanUnit),
+      height: toMetric(mHeight, "height", scanUnit),
+      weight: toMetric(mWeight, "weight", scanUnit),
+      source: "manual",
+    };
+    const nextProfile = { ...profile, ...patch };
+    applyMeasurements(patch, "manual");
+    updateProfile({ height: patch.height, weight: patch.weight });
+    const result = await saveProfile(nextProfile);
+    if (result?.ok) Alert.alert("Saved", "Measurements saved to your fitting profile.");
+    else Alert.alert("Save failed", result?.error || "Unable to save your measurements.");
   };
 
   const renderManualTab = () => (
     <View>
       <View style={styles.tipCard}>
-        <Text style={styles.tipHeading}>Manual entry for {segLabel}</Text>
+        <View style={styles.unitHeaderRow}>
+          <Text style={styles.tipHeading}>Manual entry for {segLabel}</Text>
+          <Pressable style={styles.unitToggle} onPress={toggleScanUnit}>
+            <Text style={scanUnit === "cm" ? styles.unitActive : styles.unitText}>CM</Text>
+            <Text style={styles.unitDivider}>/</Text>
+            <Text style={scanUnit === "in" ? styles.unitActive : styles.unitText}>IN</Text>
+          </Pressable>
+        </View>
         <Text style={styles.tipBody}>
-          Enter measurements in centimetres. At least one of bust, waist, or hips is required.
+          Enter measurements in {scanUnit === "cm" ? "centimetres" : "inches"}. Values convert automatically.
         </Text>
       </View>
       {mErrors._form ? <Text style={styles.errBanner}>{mErrors._form}</Text> : null}
       {[
-        ["Bust (cm)", mBust, setMBust, "bust", "e.g. 88"],
-        ["Waist (cm)", mWaist, setMWaist, "waist", "e.g. 70"],
-        ["Hips (cm)", mHips, setMHips, "hips", "e.g. 95"],
-        ["Height (cm)", mHeight, setMHeight, "height", "e.g. 162"],
-        ["Weight (kg)", mWeight, setMWeight, "weight", "e.g. 58"],
+        [`Bust (${scanUnit})`, mBust, setMBust, "bust", scanUnit === "cm" ? "e.g. 88" : "e.g. 35"],
+        [`Waist (${scanUnit})`, mWaist, setMWaist, "waist", scanUnit === "cm" ? "e.g. 70" : "e.g. 28"],
+        [`Hips (${scanUnit})`, mHips, setMHips, "hips", scanUnit === "cm" ? "e.g. 95" : "e.g. 37"],
+        [`Height (${scanUnit})`, mHeight, setMHeight, "height", scanUnit === "cm" ? "e.g. 162" : "e.g. 64"],
+        [`Weight (${scanUnit === "cm" ? "kg" : "lb"})`, mWeight, setMWeight, "weight", scanUnit === "cm" ? "e.g. 58" : "e.g. 128"],
       ].map(([label, val, setter, key, ph]) => (
         <View key={key} style={styles.field}>
           <Text style={styles.label}>{label}</Text>
@@ -332,7 +376,7 @@ export function FittingScanPanel() {
         }}
       >
         {permission?.granted ? (
-          <NativePoseCamera
+          <MoveNetPoseCamera
             facing="front"
             isActive={scanning && !locked}
             onPoseMap={onPoseMap}
@@ -424,7 +468,12 @@ export function FittingScanPanel() {
                     placeholder="e.g. 162"
                     onChangeText={setHeightInput}
                   />
-                  <Text style={styles.heightUnit}>cm</Text>
+                  <Text style={styles.heightUnit}>{scanUnit}</Text>
+                  <Pressable style={styles.unitToggle} onPress={toggleScanUnit}>
+                    <Text style={scanUnit === "cm" ? styles.unitActive : styles.unitText}>CM</Text>
+                    <Text style={styles.unitDivider}>/</Text>
+                    <Text style={scanUnit === "in" ? styles.unitActive : styles.unitText}>IN</Text>
+                  </Pressable>
                 </View>
                 <Text style={styles.heightHint}>
                   Enter before scanning for significantly better accuracy. You can skip this.
@@ -480,13 +529,13 @@ export function FittingScanPanel() {
             </Pressable>
           ) : null}
           {[
-            ["Bust (cm)", adjBust, setAdjBust, measVariance.bust],
-            ["Waist (cm)", adjWaist, setAdjWaist, measVariance.waist],
-            ["Hips (cm)", adjHips, setAdjHips, measVariance.hip],
+            [`Bust (${scanUnit})`, adjBust, setAdjBust, measVariance.bust],
+            [`Waist (${scanUnit})`, adjWaist, setAdjWaist, measVariance.waist],
+            [`Hips (${scanUnit})`, adjHips, setAdjHips, measVariance.hip],
           ].map(([label, val, setter, variance]) => (
             <View key={label} style={styles.field}>
               <Text style={styles.label}>
-                {label} <Text style={styles.variance}>±{variance} cm</Text>
+                {label} <Text style={styles.variance}>±{scanUnit === "cm" ? variance : (variance / CM_PER_INCH).toFixed(1)} {scanUnit}</Text>
               </Text>
               <TextInput style={styles.input} keyboardType="numeric" value={val} onChangeText={setter} />
             </View>
@@ -522,9 +571,9 @@ export function FittingScanPanel() {
         <View style={styles.liveBox}>
           <Text style={styles.liveHeading}>Live estimate</Text>
           <View style={styles.liveGrid}>
-            <Text style={styles.liveItem}>Bust {liveEst.bust} cm</Text>
-            <Text style={styles.liveItem}>Waist {liveEst.waist} cm</Text>
-            <Text style={styles.liveItem}>Hips {liveEst.hips} cm</Text>
+            <Text style={styles.liveItem}>Bust {toDisplayUnit(liveEst.bust, "bust", scanUnit)} {scanUnit}</Text>
+            <Text style={styles.liveItem}>Waist {toDisplayUnit(liveEst.waist, "waist", scanUnit)} {scanUnit}</Text>
+            <Text style={styles.liveItem}>Hips {toDisplayUnit(liveEst.hips, "hips", scanUnit)} {scanUnit}</Text>
           </View>
           <View style={styles.confTrack}>
             <View style={[styles.confFill, { width: `${confidence}%`, backgroundColor: confColor }]} />
@@ -683,6 +732,11 @@ const styles = StyleSheet.create({
   variance: { color: brand.textLight, fontWeight: "400", fontSize: 10 },
   varianceNote: { fontSize: 11, color: brand.textLight, lineHeight: 16, marginBottom: 8 },
   tipCard: { backgroundColor: "#f5f0eb", padding: 12, borderRadius: 8, marginBottom: 10 },
+  unitHeaderRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  unitToggle: { flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: brand.border, borderRadius: 7, backgroundColor: brand.white, paddingHorizontal: 8, paddingVertical: 5 },
+  unitText: { color: brand.textLight, fontSize: 10, fontWeight: "700" },
+  unitActive: { color: brand.dark, fontSize: 10, fontWeight: "800" },
+  unitDivider: { color: brand.border, fontSize: 10, marginHorizontal: 4 },
   tipHeading: { fontWeight: "700", color: brand.dark, fontSize: 13 },
   tipBody: { color: brand.textLight, fontSize: 11, marginTop: 4, lineHeight: 16 },
   heightWarn: { color: "#7a5a1a", fontSize: 11, marginTop: 6 },
