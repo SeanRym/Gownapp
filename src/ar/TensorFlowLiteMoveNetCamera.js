@@ -11,7 +11,7 @@ import * as FileSystem from "react-native-fs";
 const { MoveNetNativeModule } = NativeModules;
 
 /**
- * TensorFlow Lite MoveNet Camera — Native Android Inference
+ * Native pose camera. Android uses TFLite MoveNet; iOS uses Apple Vision.
  *
  * Captures each frame, writes it to disk, and runs MoveNet native inference on the Android side.
  * Returns real MoveNet landmarks in the app's normalized pose contract.

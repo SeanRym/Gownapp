@@ -2,7 +2,7 @@ import { TensorFlowLiteMoveNetCamera } from "./TensorFlowLiteMoveNetCamera";
 import { forwardRef } from "react";
 
 /**
- * MoveNet + TensorFlow Lite only.
+ * Shared native pose camera for Android and iOS.
  */
 export const MoveNetPoseCamera = forwardRef(function MoveNetPoseCamera({
   facing,

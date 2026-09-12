@@ -33,7 +33,7 @@ const FACING_THRESHOLD = 8; // ~0.27s at 30fps
 
 /**
  * AR Try-On Screen — Exact web logic port
- *
+ * 
  * Pose lock mechanism: gown stays visible once locked, doesn't disappear on tracking glitches.
  * Facing back smoothing: sustained detection required before switching images.
  */
@@ -80,7 +80,7 @@ export function ARTryOnScreen({ route }) {
 
   // Pose lock tracking
   const goodFramesRef = useRef(0);
-
+  
   // Facing back smoothing
   const facingBackFramesRef = useRef(0);
 
