@@ -13,6 +13,11 @@ Pod::Spec.new do |s|
   s.source       = { :path => "." }
   s.source_files = "ios/**/*.{h,m,mm}"
   s.frameworks   = "Vision", "CoreImage", "UIKit"
+
+  # This package uses VisionCamera frame-processor APIs and worklets;
+  # depending on the root pod alone is not enough for iOS builds.
+  s.dependency   "React"
   s.dependency   "React-Core"
-  s.dependency   "VisionCamera"
+  s.dependency   "VisionCamera/FrameProcessors"
+  s.dependency   "react-native-worklets-core"
 end
