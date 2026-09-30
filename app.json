@@ -13,8 +13,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.jcebridal.mobile",
-      "deploymentTarget": "15.1"
+      "bundleIdentifier": "com.jcebridal.mobile"
     },
     "android": {
       "package": "com.jcebridal.mobile",

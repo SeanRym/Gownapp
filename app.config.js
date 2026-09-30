@@ -33,28 +33,24 @@ function loadDotEnv() {
 
 loadDotEnv();
 
-const appJson = require("./app.json");
-
 const apiBaseUrl = String(process.env.EXPO_PUBLIC_API_BASE_URL || DEFAULT_API_BASE)
   .trim()
   .replace(/\/+$/, "");
 const adminSecret = String(process.env.EXPO_PUBLIC_ADMIN_SECRET || "").trim();
 
-module.exports = {
-  expo: {
-    ...appJson.expo,
-    android: {
-      ...(appJson.expo?.android || {}),
-      softwareKeyboardLayoutMode: "pan",
-    },
-    plugins: [...(appJson.expo?.plugins || []), "@react-native-community/datetimepicker"],
-    extra: {
-      ...(appJson.expo?.extra || {}),
-      eas: {
-        projectId: "b85e90e0-4895-42e8-8464-0d1126ad2ddd",
-      },
-      apiBaseUrl,
-      adminSecret,
-    },
+module.exports = ({ config }) => ({
+  ...config,
+  android: {
+    ...(config.android || {}),
+    softwareKeyboardLayoutMode: "pan",
   },
-};
+  plugins: [...(config.plugins || []), "@react-native-community/datetimepicker"],
+  extra: {
+    ...(config.extra || {}),
+    eas: {
+      projectId: "b85e90e0-4895-42e8-8464-0d1126ad2ddd",
+    },
+    apiBaseUrl,
+    adminSecret,
+  },
+});
