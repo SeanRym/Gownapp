@@ -30,7 +30,7 @@ static CGImagePropertyOrientation VisionOrientation(UIImageOrientation orientati
   return kCGImagePropertyOrientationUp;
 }
 
-static NSDictionary *PointDictionary(VNRecognizedPointsObservation *observation,
+static NSDictionary *PointDictionary(VNHumanBodyPoseObservation *observation,
                                       VNHumanBodyPoseObservationJointName jointName) {
   NSError *error = nil;
   VNRecognizedPoint *point = [observation recognizedPointForJointName:jointName error:&error];
@@ -67,7 +67,7 @@ RCT_EXPORT_METHOD(getLandmarksFromBitmap:(NSString *)imagePath
     return;
   }
 
-  VNRecognizedPointsObservation *observation = request.results.firstObject;
+  VNHumanBodyPoseObservation *observation = request.results.firstObject;
   if (observation == nil) {
     reject(@"LANDMARKS_ERROR", @"Vision found no body pose.", nil);
     return;
