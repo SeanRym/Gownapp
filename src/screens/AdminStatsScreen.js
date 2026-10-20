@@ -139,10 +139,15 @@ export function AdminStatsScreen() {
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    const [ordersData, gownsData] = await Promise.all([getAllOrdersAdmin(), getAllGownsAdmin()]);
-    setOrders(Array.isArray(ordersData) ? ordersData : []);
-    setGowns(Array.isArray(gownsData) ? gownsData : []);
-    setLoading(false);
+    try {
+      const [ordersData, gownsData] = await Promise.all([getAllOrdersAdmin(), getAllGownsAdmin()]);
+      setOrders(Array.isArray(ordersData) ? ordersData : []);
+      setGowns(Array.isArray(gownsData) ? gownsData : []);
+    } catch (e) {
+      Alert.alert("Stats could not be loaded", e?.message || "Unable to load admin data.");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useFocusEffect(
@@ -788,4 +793,3 @@ const styles = StyleSheet.create({
   deniedTitle: { fontSize: 18, fontWeight: "900", color: brand.dark },
   deniedText: { marginTop: 6, color: brand.textLight, textAlign: "center" },
 });
-

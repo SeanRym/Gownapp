@@ -32,6 +32,7 @@ export function AdminPanelScreen({ navigation }) {
       setUsers(Array.isArray(usersData) ? usersData : []);
     } catch (e) {
       console.warn("AdminPanel loadData", e?.message || e);
+      Alert.alert("Admin dashboard could not be loaded", e?.message || "Unable to load admin data.");
       setOrders([]);
       setGowns([]);
       setUsers([]);

@@ -13,7 +13,6 @@ import { useShop } from "../context/ShopContext";
 import { canAccess } from "../utils/access";
 import { brand } from "../theme/brand";
 import { formatDateTimePH } from "../utils/datetime";
-import { idsEqual } from "../utils/id";
 
 const TRACKING_OPTIONS = getTrackingStatusOptions();
 const ORDER_STATUS_OPTIONS = getOrderStatusOptions();
@@ -33,6 +32,14 @@ function money(n) {
 
 function prettyStatus(v) {
   return String(v || "").replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function getPaymentStatus(order) {
+  const paymentStatus = String(order?.paymentStatus || "").trim().toLowerCase();
+  if (paymentStatus) return paymentStatus === "verified" ? "paid" : paymentStatus;
+  const proofStatus = String(order?.paymentProofStatus || order?.proofStatus || "").trim().toLowerCase();
+  if (proofStatus === "verified") return "paid";
+  return proofStatus || "unpaid";
 }
 
 function getBadgeTone(statusLike) {
@@ -95,12 +102,18 @@ export function AdminOrdersScreen() {
   const [confirmAction, setConfirmAction] = useState(null);
   const [confirmNote, setConfirmNote] = useState("");
   const [confirmForce, setConfirmForce] = useState(false);
+  const [submittingAction, setSubmittingAction] = useState("");
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    const data = await getAllOrdersAdmin();
-    setOrders(data);
-    setLoading(false);
+    try {
+      const data = await getAllOrdersAdmin();
+      setOrders(data);
+    } catch (e) {
+      Alert.alert("Orders could not be loaded", e?.message || "Unable to load orders. Check your connection and try again.");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useFocusEffect(
@@ -137,20 +150,50 @@ export function AdminOrdersScreen() {
   };
 
   const onReviewProof = async (orderId, action) => {
-    const result = await reviewOrderPaymentProofAdmin(orderId, {
-      action,
-      referenceNumber: proofReferenceNo,
-      reason: proofRejectReason,
-    });
-    if (!result.ok) {
-      Alert.alert("Proof review failed", result.error || "Could not review payment proof.");
-      return;
+    if (submittingAction) return;
+    setSubmittingAction(`proof-${action}`);
+    try {
+      const result = await reviewOrderPaymentProofAdmin(orderId, {
+        action,
+        referenceNumber: proofReferenceNo,
+        reason: proofRejectReason,
+      });
+      if (!result.ok) {
+        Alert.alert("Proof review failed", result.error || "Could not review payment proof.");
+        return;
+      }
+      setProofReferenceNo("");
+      setProofRejectReason("");
+      setReviewOpen(false);
+      setReviewOrder(null);
+      await loadData();
+    } catch (e) {
+      Alert.alert("Proof review failed", e?.message || "Could not review payment proof.");
+    } finally {
+      setSubmittingAction("");
     }
-    setProofReferenceNo("");
-    setProofRejectReason("");
-    setReviewOpen(false);
-    setReviewOrder(null);
-    loadData();
+  };
+
+  const onConfirmStatus = async () => {
+    if (submittingAction || !selectedOrder || !confirmAction) return;
+    setSubmittingAction("status");
+    try {
+      const result = await updateOrderStatusAdmin(selectedOrder.id, confirmAction, {
+        force: confirmForce,
+        note: confirmNote,
+      });
+      if (!result.ok) {
+        Alert.alert("Status update failed", result.error || "Could not update order status.");
+        return;
+      }
+      setSelectedOrder((order) => (order ? { ...order, status: confirmAction } : order));
+      setConfirmOpen(false);
+      await loadData();
+    } catch (e) {
+      Alert.alert("Status update failed", e?.message || "Could not update order status.");
+    } finally {
+      setSubmittingAction("");
+    }
   };
 
   const q = String(query || "").trim().toLowerCase();
@@ -168,6 +211,7 @@ export function AdminOrdersScreen() {
       if (!q) return true;
       const hay = [
         o?.id,
+        o?.orderNumber,
         o?.contact?.firstName,
         o?.contact?.lastName,
         o?.contact?.email,
@@ -217,8 +261,8 @@ export function AdminOrdersScreen() {
           <Text style={styles.title}>Orders</Text>
           <Text style={styles.meta}>Manage orders, payments, and tracking.</Text>
         </View>
-        <Pressable style={styles.refreshBtn} onPress={loadData}>
-          <Text style={styles.refreshBtnText}>{loading ? "..." : "Refresh"}</Text>
+        <Pressable style={styles.refreshBtn} onPress={loadData} disabled={loading}>
+          <Text style={styles.refreshBtnText}>{loading ? "Loading..." : "Refresh"}</Text>
         </Pressable>
       </View>
 
@@ -280,7 +324,7 @@ export function AdminOrdersScreen() {
         <View style={styles.filterRow}>
           {(() => {
             const proofPendingCount = orders.filter((o) => String(o?.paymentProofStatus || o?.proofStatus || "").toLowerCase() === "pending").length;
-            const filters = ["all", "proof_pending", "placed", "paid", "processing", "ready", "shipped", "completed", "cancelled"];
+            const filters = ["all", "proof_pending", "placed", "paid", "processing", "ready", "shipped", "completed", "cancelled", "refunded"];
             return filters.map((s) => (
               <Pressable
                 key={`filter-${s}`}
@@ -335,13 +379,13 @@ export function AdminOrdersScreen() {
                   styles.badgeBase,
                   styles[
                     `badge${
-                      getBadgeTone(o.paymentProofStatus || o.payment || "-")[0].toUpperCase() +
-                      getBadgeTone(o.paymentProofStatus || o.payment || "-").slice(1)
+                      getBadgeTone(getPaymentStatus(o))[0].toUpperCase() +
+                      getBadgeTone(getPaymentStatus(o)).slice(1)
                     }`
                   ],
                 ]}
               >
-                {prettyStatus(o.paymentProofStatus || o.payment || "-")}
+                {prettyStatus(getPaymentStatus(o))}
               </Text>
             </View>
             <Text style={[styles.total, styles.colTotal]} numberOfLines={1}>{money(o.total || o.subtotal)}</Text>
@@ -349,12 +393,14 @@ export function AdminOrdersScreen() {
               {String(o?.paymentProofStatus || o?.proofStatus || "").toLowerCase() === "pending" ? (
                 <Pressable
                   style={styles.rowVerifyBtn}
-                  onPress={() => {
+                  onPress={(event) => {
+                    event.stopPropagation();
                     setReviewOrder(o);
                     setProofReferenceNo(String(o?.paymentProof?.referenceNumber || ""));
                     setProofRejectReason("");
                     setReviewOpen(true);
                   }}
+                  disabled={Boolean(submittingAction)}
                 >
                   <Text style={styles.rowVerifyBtnText}>Verify</Text>
                 </Pressable>
@@ -374,7 +420,7 @@ export function AdminOrdersScreen() {
                 <Text style={styles.detailTitle}>{reviewOrder?.orderNumber || `JCE-${reviewOrder?.id || "-"}`}</Text>
                 <Text style={styles.meta}>{reviewOrder?.contact?.firstName} {reviewOrder?.contact?.lastName} • {money(reviewOrder?.total || reviewOrder?.subtotal)} • {prettyStatus(reviewOrder?.payment || "-")}</Text>
               </View>
-              <Pressable style={styles.detailCloseTopBtn} onPress={() => setReviewOpen(false)}>
+              <Pressable style={styles.detailCloseTopBtn} onPress={() => setReviewOpen(false)} disabled={Boolean(submittingAction)}>
                 <Text style={styles.detailClose}>X</Text>
               </Pressable>
             </View>
@@ -428,11 +474,11 @@ export function AdminOrdersScreen() {
               multiline
             />
             <View style={styles.row}>
-              <Pressable style={styles.verifyBtn} onPress={() => onReviewProof(reviewOrder?.id, "verify")}>
-                <Text style={styles.verifyBtnText}>✓ Verify payment</Text>
+              <Pressable style={styles.verifyBtn} onPress={() => onReviewProof(reviewOrder?.id, "verify")} disabled={Boolean(submittingAction)}>
+                <Text style={styles.verifyBtnText}>{submittingAction === "proof-verify" ? "Verifying..." : "✓ Verify payment"}</Text>
               </Pressable>
-              <Pressable style={styles.dangerBtn} onPress={() => onReviewProof(reviewOrder?.id, "reject")}>
-                <Text style={styles.dangerBtnText}>✗ Reject proof</Text>
+              <Pressable style={styles.dangerBtn} onPress={() => onReviewProof(reviewOrder?.id, "reject")} disabled={Boolean(submittingAction)}>
+                <Text style={styles.dangerBtnText}>{submittingAction === "proof-reject" ? "Rejecting..." : "✗ Reject proof"}</Text>
               </Pressable>
             </View>
           </Pressable>
@@ -472,13 +518,13 @@ export function AdminOrdersScreen() {
                   styles.badgeBase,
                   styles[
                     `badge${
-                      getBadgeTone(selectedOrder?.paymentProofStatus || selectedOrder?.payment || "-")[0].toUpperCase() +
-                      getBadgeTone(selectedOrder?.paymentProofStatus || selectedOrder?.payment || "-").slice(1)
+                      getBadgeTone(getPaymentStatus(selectedOrder))[0].toUpperCase() +
+                      getBadgeTone(getPaymentStatus(selectedOrder)).slice(1)
                     }`
                   ],
                 ]}
               >
-                {prettyStatus(selectedOrder?.paymentProofStatus || selectedOrder?.payment || "-")}
+                {prettyStatus(getPaymentStatus(selectedOrder))}
               </Text>
             </View>
 
@@ -504,6 +550,7 @@ export function AdminOrdersScreen() {
 
             <Text style={styles.detailSection}>Payment</Text>
             <Text style={styles.meta}>Method: {selectedOrder?.payment || "-"}</Text>
+            <Text style={styles.meta}>Status: {prettyStatus(getPaymentStatus(selectedOrder))}</Text>
 
             <Text style={styles.detailSection}>Update status</Text>
             {String(selectedOrder?.status || "").toLowerCase() === "completed" ? (
@@ -592,7 +639,7 @@ export function AdminOrdersScreen() {
                 <Text style={styles.detailLabel}>Change to "{prettyStatus(confirmAction)}"?</Text>
                 <Text style={styles.meta}>{getConfirmDescription(confirmAction)}</Text>
               </View>
-              <Pressable style={styles.detailCloseTopBtn} onPress={() => setConfirmOpen(false)}>
+              <Pressable style={styles.detailCloseTopBtn} onPress={() => setConfirmOpen(false)} disabled={Boolean(submittingAction)}>
                 <Text style={styles.detailClose}>X</Text>
               </Pressable>
             </View>
@@ -612,7 +659,7 @@ export function AdminOrdersScreen() {
               </Pressable>
             ) : null}
             <View style={styles.row}>
-              <Pressable style={styles.cancelButton} onPress={() => setConfirmOpen(false)}>
+              <Pressable style={styles.cancelButton} onPress={() => setConfirmOpen(false)} disabled={Boolean(submittingAction)}>
                 <Text style={styles.cancelButtonText}>Cancel</Text>
               </Pressable>
               <Pressable
@@ -620,18 +667,12 @@ export function AdminOrdersScreen() {
                   getConfirmTone(confirmAction) === "primary" ? styles.primaryAction : getConfirmTone(confirmAction) === "danger" ? styles.dangerBtn : styles.verifyBtn,
                   { flex: 1 },
                 ]}
-                onPress={async () => {
-                  const res = await updateOrderStatusAdmin(selectedOrder?.id, confirmAction, { force: confirmForce, note: confirmNote });
-                  if (!res.ok) {
-                    Alert.alert("Status update failed", res.error || "Could not update order status.");
-                  } else {
-                    setSelectedOrder(res.order || (await getAllOrdersAdmin()).find((x) => idsEqual(x?.id, selectedOrder?.id)));
-                  }
-                  setConfirmOpen(false);
-                  loadData();
-                }}
+                onPress={onConfirmStatus}
+                disabled={Boolean(submittingAction)}
               >
-                <Text style={getConfirmTone(confirmAction) === "primary" ? styles.primaryActionText : getConfirmTone(confirmAction) === "danger" ? styles.dangerBtnText : styles.verifyBtnText}>Yes, {prettyStatus(confirmAction)}</Text>
+                <Text style={getConfirmTone(confirmAction) === "primary" ? styles.primaryActionText : getConfirmTone(confirmAction) === "danger" ? styles.dangerBtnText : styles.verifyBtnText}>
+                  {submittingAction === "status" ? "Updating..." : `Yes, ${prettyStatus(confirmAction)}`}
+                </Text>
               </Pressable>
             </View>
           </Pressable>

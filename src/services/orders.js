@@ -358,14 +358,10 @@ export async function getCustomerOrderById(orderKey, email, sessionUserId) {
 }
 
 export async function getAllOrdersAdmin() {
-  try {
-    const data = await requestJson("/api/admin/orders", {
-      headers: adminAuthHeaders(),
-    });
-    return (Array.isArray(data?.orders) ? data.orders : []).map(mapOrderForMobile);
-  } catch {
-    return [];
-  }
+  const data = await requestJson("/api/admin/orders", {
+    headers: adminAuthHeaders(),
+  });
+  return (Array.isArray(data?.orders) ? data.orders : []).map(mapOrderForMobile);
 }
 
 export async function getOrderById(orderKey) {
@@ -438,7 +434,12 @@ export async function submitOrderPaymentProof(orderKey, payload, sessionUserId) 
       const latest = findOrderInList(mine, lookupKey);
       return { ok: true, order: latest || merged };
     }
-    const latest = await getOrderById(lookupKey);
+    let latest = null;
+    try {
+      latest = await getOrderById(lookupKey);
+    } catch (e) {
+      console.warn("submitOrderPaymentProof refresh", e?.message || e);
+    }
     return { ok: true, order: latest || merged };
   } catch (e) {
     return { ok: false, error: e?.message || "Could not submit payment proof." };
@@ -450,19 +451,23 @@ export async function reviewOrderPaymentProofAdmin(orderId, payload) {
   if (!["verify", "reject"].includes(action)) {
     return { ok: false, error: "Invalid review action." };
   }
+  const normalizedOrderId = normalizeId(orderId);
+  if (!normalizedOrderId) return { ok: false, error: "Missing order id." };
   try {
-    await requestJson("/api/admin/orders", {
+    const result = await requestJson("/api/admin/orders", {
       method: "PATCH",
       headers: adminAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         action: action === "verify" ? "verify-payment" : "reject-payment",
-        orderId: normalizeId(orderId),
+        orderId: normalizedOrderId,
         referenceNo: String(payload?.referenceNumber || "").trim(),
         reason: String(payload?.reason || "").trim(),
       }),
     });
-    const latest = await getOrderById(orderId);
-    return { ok: true, order: latest };
+    if (result?.ok === false || result?.success === false || result?.error) {
+      return { ok: false, error: result.error || "The server rejected the payment proof update." };
+    }
+    return { ok: true, order: null };
   } catch (e) {
     return { ok: false, error: e?.message || "Could not review payment proof." };
   }
@@ -473,21 +478,25 @@ export async function updateOrderStatusAdmin(orderId, nextStatus, opts = {}) {
   if (!STATUS_FLOW.includes(targetStatus)) {
     return { ok: false, error: "Invalid status." };
   }
+  const normalizedOrderId = normalizeId(orderId);
+  if (!normalizedOrderId) return { ok: false, error: "Missing order id." };
   try {
     const payload = {
       action: "status",
-      orderId: normalizeId(orderId),
+      orderId: normalizedOrderId,
       status: targetStatus,
     };
     if (opts.force) payload.force = true;
     if (opts.note) payload.note = String(opts.note || "").trim();
-    await requestJson("/api/admin/orders", {
+    const result = await requestJson("/api/admin/orders", {
       method: "PATCH",
       headers: adminAuthHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(payload),
     });
-    const latest = await getOrderById(orderId);
-    return { ok: true, order: latest };
+    if (result?.ok === false || result?.success === false || result?.error) {
+      return { ok: false, error: result.error || "The server rejected the order status update." };
+    }
+    return { ok: true, order: null };
   } catch (e) {
     return { ok: false, error: e?.message || "Could not update order status." };
   }
@@ -503,7 +512,12 @@ export async function confirmOrderReceipt(orderId, userId) {
       headers: { "Content-Type": "application/json", "x-user-id": String(userId) },
       body: JSON.stringify({ orderId: normalizedOrderId, status: "completed" }),
     });
-    const latest = await getOrderById(normalizedOrderId);
+    let latest = null;
+    try {
+      latest = await getOrderById(normalizedOrderId);
+    } catch (e) {
+      console.warn("confirmOrderReceipt refresh", e?.message || e);
+    }
     return { ok: true, order: latest };
   } catch (e) {
     return { ok: false, error: e?.message || "Could not confirm receipt." };
