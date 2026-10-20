@@ -13,6 +13,7 @@ import { useShop } from "../context/ShopContext";
 import { canAccess } from "../utils/access";
 import { brand } from "../theme/brand";
 import { formatDateTimePH } from "../utils/datetime";
+import { idsEqual } from "../utils/id";
 
 const TRACKING_OPTIONS = getTrackingStatusOptions();
 const ORDER_STATUS_OPTIONS = getOrderStatusOptions();
@@ -31,7 +32,7 @@ function money(n) {
 }
 
 function prettyStatus(v) {
-  return String(v || "").replace(/\b\w/g, (m) => m.toUpperCase());
+  return String(v || "").replace(/[_-]+/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
 function getPaymentStatus(order) {
@@ -51,13 +52,19 @@ function getBadgeTone(statusLike) {
   return "green";
 }
 
-function getConfirmDescription(action) {
+function getConfirmDescription(action, order) {
   const a = String(action || "").toLowerCase();
-  if (a === "paid") return "This will move the order back to \"Paid\". The customer will be notified.";
-  if (a === "ready") return "This will mark the order as \"Ready\" and notify the customer.";
   if (a === "cancelled") return "This will cancel the order and notify the customer. Stock will be restored. This cannot be undone.";
-  if (a === "refunded") return "This will refund the order and notify the customer. This cannot be undone.";
-  return "This will change the order status and notify the customer.";
+  if (a === "refunded") return "This will mark the order as refunded and notify the customer. This cannot be undone.";
+  const currentStatus = String(order?.status || "").toLowerCase();
+  const isPrevious =
+    (currentStatus === "pending_payment" && a === "placed") ||
+    (currentStatus === "processing" && a === "paid") ||
+    (currentStatus === "ready" && a === "processing");
+  const label = prettyStatus(a);
+  return isPrevious
+    ? `This will move the order back to "${label}". The customer will be notified.`
+    : `This will advance the order to "${label}". The customer will be notified by email.`;
 }
 
 function getConfirmTone(action) {
@@ -67,19 +74,72 @@ function getConfirmTone(action) {
   return "default";
 }
 
-function getAdminOrderActions(currentStatus) {
-  const status = String(currentStatus || "").toLowerCase();
-  const actions = {
-    placed: ["paid", "cancelled", "refunded"],
-    paid: ["processing", "cancelled", "refunded"],
-    processing: ["paid", "ready", "cancelled", "refunded"],
-    ready: ["shipped", "cancelled", "refunded"],
-    shipped: ["completed", "cancelled", "refunded"],
-    completed: [],
-    cancelled: [],
-    refunded: [],
+function getAdminOrderActions(order) {
+  const status = String(order?.status || "").toLowerCase();
+  const deliveryMethod = String(order?.delivery?.method || order?.deliveryMethod || "pickup").toLowerCase();
+  const paymentMethod = String(order?.payment || order?.paymentMethod || "").toLowerCase();
+  const paymentStatus = String(order?.paymentStatus || "").toLowerCase();
+  const proofStatus = String(order?.paymentProofStatus || order?.proofStatus || "").toLowerCase();
+  const isPickupCash = deliveryMethod === "pickup" && paymentMethod === "cash";
+  const isPickupOnline = deliveryMethod === "pickup" && ["gcash", "bdo"].includes(paymentMethod);
+  const isPaid = paymentStatus === "paid" || isPickupCash;
+  const flows = {
+    pickupCash: {
+      placed: { next: "paid" },
+      paid: { next: "processing" },
+      processing: { next: "ready", previous: "paid" },
+      ready: { next: "completed", previous: "processing" },
+    },
+    pickupOnline: {
+      placed: { next: "pending_payment" },
+      pending_payment: { next: "paid", previous: "placed" },
+      paid: { next: "processing" },
+      processing: { next: "ready", previous: "paid" },
+      ready: { next: "completed", previous: "processing" },
+    },
+    delivery: {
+      placed: { next: "pending_payment" },
+      pending_payment: { next: "paid", previous: "placed" },
+      paid: { next: "processing" },
+      processing: { next: "ready", previous: "paid" },
+      ready: { next: "shipped", previous: "processing" },
+      shipped: { next: "completed" },
+    },
   };
-  return actions[status] || [];
+  const flow = isPickupCash ? flows.pickupCash : isPickupOnline ? flows.pickupOnline : flows.delivery;
+  const transition = flow[status];
+  if (!transition) return [];
+
+  const actions = [];
+  if (transition.previous) actions.push(transition.previous);
+  if (
+    transition.next &&
+    (!["processing", "ready", "shipped"].includes(transition.next) || isPaid) &&
+    (transition.next !== "paid" || isPickupCash || proofStatus === "verified")
+  ) {
+    actions.push(transition.next);
+  }
+  if (["placed", "pending_payment", "paid", "processing", "ready"].includes(status)) actions.push("cancelled");
+  if (["paid", "processing", "ready", "shipped"].includes(status)) actions.push("refunded");
+  return actions;
+}
+
+function getBlockedStatusActionMessage(order) {
+  const status = String(order?.status || "").toLowerCase();
+  const deliveryMethod = String(order?.delivery?.method || order?.deliveryMethod || "pickup").toLowerCase();
+  const paymentMethod = String(order?.payment || order?.paymentMethod || "").toLowerCase();
+  const paymentStatus = String(order?.paymentStatus || "").toLowerCase();
+  const proofStatus = String(order?.paymentProofStatus || order?.proofStatus || "").toLowerCase();
+  const isPickupCash = deliveryMethod === "pickup" && paymentMethod === "cash";
+  const flowAdvancesToProcessing = ["paid", "processing", "ready"].includes(status);
+
+  if (status === "pending_payment" && !isPickupCash && proofStatus !== "verified") {
+    return "Verify proof before marking paid.";
+  }
+  if (flowAdvancesToProcessing && !isPickupCash && paymentStatus !== "paid") {
+    return "Verify payment before processing.";
+  }
+  return "";
 }
 
 export function AdminOrdersScreen() {
@@ -109,8 +169,10 @@ export function AdminOrdersScreen() {
     try {
       const data = await getAllOrdersAdmin();
       setOrders(data);
+      return data;
     } catch (e) {
       Alert.alert("Orders could not be loaded", e?.message || "Unable to load orders. Check your connection and try again.");
+      return null;
     } finally {
       setLoading(false);
     }
@@ -162,11 +224,23 @@ export function AdminOrdersScreen() {
         Alert.alert("Proof review failed", result.error || "Could not review payment proof.");
         return;
       }
+      const refreshedOrders = await loadData();
+      const refreshedOrder = refreshedOrders?.find((order) => idsEqual(order?.id, orderId));
+      const expectedProofStatus = action === "verify" ? "verified" : "rejected";
       setProofReferenceNo("");
       setProofRejectReason("");
       setReviewOpen(false);
       setReviewOrder(null);
-      await loadData();
+      if (
+        refreshedOrders &&
+        refreshedOrder &&
+        String(refreshedOrder.paymentProofStatus || refreshedOrder.proofStatus || "").toLowerCase() !== expectedProofStatus
+      ) {
+        Alert.alert(
+          "Proof review not confirmed",
+          `The server accepted the request, but the refreshed order does not show ${expectedProofStatus}. Refresh Orders before retrying.`
+        );
+      }
     } catch (e) {
       Alert.alert("Proof review failed", e?.message || "Could not review payment proof.");
     } finally {
@@ -186,9 +260,20 @@ export function AdminOrdersScreen() {
         Alert.alert("Status update failed", result.error || "Could not update order status.");
         return;
       }
-      setSelectedOrder((order) => (order ? { ...order, status: confirmAction } : order));
       setConfirmOpen(false);
-      await loadData();
+      const refreshedOrders = await loadData();
+      const refreshedOrder = refreshedOrders?.find((order) => idsEqual(order?.id, selectedOrder.id));
+      if (!refreshedOrder) {
+        Alert.alert("Status sent", "The server accepted the update, but the order could not be reloaded. Refresh Orders to confirm its status.");
+        return;
+      }
+      setSelectedOrder(refreshedOrder);
+      if (String(refreshedOrder.status || "").toLowerCase() !== confirmAction) {
+        Alert.alert(
+          "Status not confirmed",
+          `The server still reports ${prettyStatus(refreshedOrder.status)} for this order. Refresh Orders before trying again.`
+        );
+      }
     } catch (e) {
       Alert.alert("Status update failed", e?.message || "Could not update order status.");
     } finally {
@@ -328,7 +413,7 @@ export function AdminOrdersScreen() {
         <View style={styles.filterRow}>
           {(() => {
             const proofPendingCount = orders.filter((o) => String(o?.paymentProofStatus || o?.proofStatus || "").toLowerCase() === "pending").length;
-            const filters = ["all", "proof_pending", "placed", "paid", "processing", "ready", "shipped", "completed", "cancelled", "refunded"];
+            const filters = ["all", "proof_pending", "placed", "pending_payment", "paid", "processing", "ready", "shipped", "completed", "cancelled", "refunded"];
             return filters.map((s) => (
               <Pressable
                 key={`filter-${s}`}
@@ -336,7 +421,7 @@ export function AdminOrdersScreen() {
                 onPress={() => setStatusFilter(s)}
               >
                 <Text style={statusFilter === s ? styles.filterPillTextActive : styles.filterPillText}>
-                  {s === "all" ? "All" : s === "proof_pending" ? `Proof pending (${proofPendingCount})` : s === "placed" ? "Pending Payment" : prettyStatus(s)}
+                  {s === "all" ? "All" : s === "proof_pending" ? `Proof pending (${proofPendingCount})` : prettyStatus(s)}
                 </Text>
               </Pressable>
             ));
@@ -569,77 +654,40 @@ export function AdminOrdersScreen() {
             <Text style={styles.meta}>Status: {prettyStatus(getPaymentStatus(selectedOrder))}</Text>
 
             <Text style={styles.detailSection}>Update status</Text>
-            {String(selectedOrder?.status || "").toLowerCase() === "completed" ? (
+            {["completed", "cancelled", "refunded"].includes(String(selectedOrder?.status || "").toLowerCase()) ? (
               <View style={styles.updateDisabledCard}>
                 <Text style={styles.meta}>Customer receives an email on every change.</Text>
-                <Text style={styles.updateDisabledNote}>This order is in a terminal state (Completed) and cannot be changed.</Text>
+                <Text style={styles.updateDisabledNote}>
+                  This order is in a terminal state ({prettyStatus(selectedOrder?.status)}) and cannot be changed.
+                </Text>
               </View>
             ) : (
-              <>
-                {String(selectedOrder?.status || "").toLowerCase() === "processing" ? (
-                  <>
+              <View style={styles.statusRow}>
+                {getAdminOrderActions(selectedOrder).map((s) => {
+                  const tone = getConfirmTone(s);
+                  const label = s === "paid" ? "← Paid" : s === "ready" ? "Ready →" : prettyStatus(s);
+                  return (
                     <Pressable
-                      style={styles.statusActionLarge}
-                      onPress={async () => {
-                        await handleStatusSelection("paid");
-                      }}
+                      key={`d-status-${s}`}
+                      style={[
+                        styles.statusPill,
+                        tone === "primary" ? styles.statusPillPrimary : null,
+                        tone === "danger" ? styles.statusPillDanger : null,
+                      ]}
+                      onPress={() => handleStatusSelection(s)}
                     >
-                      <Text style={styles.statusActionLargeText}>← Paid</Text>
+                      <Text style={tone === "danger" ? styles.statusPillDangerText : tone === "primary" ? styles.statusPillPrimaryText : styles.statusPillText}>
+                        {label}
+                      </Text>
                     </Pressable>
-                    <Pressable
-                      style={[styles.statusActionLarge, styles.statusActionLargePrimary]}
-                      onPress={async () => {
-                        await handleStatusSelection("ready");
-                      }}
-                    >
-                      <Text style={styles.statusActionLargePrimaryText}>Ready →</Text>
-                    </Pressable>
-                    <View style={styles.statusRowSmall}>
-                      <Pressable
-                        style={[styles.statusPill, styles.statusPillDanger, { flex: 1 }]}
-                        onPress={async () => {
-                          await handleStatusSelection("cancelled");
-                        }}
-                      >
-                        <Text style={styles.statusPillDangerText}>Cancelled</Text>
-                      </Pressable>
-                      <Pressable
-                        style={[styles.statusPill, styles.statusPillDanger, { flex: 1 }]}
-                        onPress={async () => {
-                          await handleStatusSelection("refunded");
-                        }}
-                      >
-                        <Text style={styles.statusPillDangerText}>Refunded</Text>
-                      </Pressable>
-                    </View>
-                  </>
-                ) : (
-                  <View style={styles.statusRow}>
-                    {getAdminOrderActions(selectedOrder?.status).map((s) => {
-                      const tone = getConfirmTone(s);
-                      const label = s === "paid" ? "← Paid" : s === "ready" ? "Ready →" : prettyStatus(s);
-                      return (
-                        <Pressable
-                          key={`d-status-${s}`}
-                          style={[
-                            styles.statusPill,
-                            tone === "primary" ? styles.statusPillPrimary : null,
-                            tone === "danger" ? styles.statusPillDanger : null,
-                          ]}
-                          onPress={async () => {
-                            await handleStatusSelection(s);
-                          }}
-                        >
-                          <Text style={tone === "danger" ? styles.statusPillDangerText : tone === "primary" ? styles.statusPillPrimaryText : styles.statusPillText}>
-                            {label}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
-              </>
+                  );
+                })}
+              </View>
             )}
+            {!["completed", "cancelled", "refunded"].includes(String(selectedOrder?.status || "").toLowerCase()) &&
+            getBlockedStatusActionMessage(selectedOrder) ? (
+              <Text style={styles.meta}>🔒 {getBlockedStatusActionMessage(selectedOrder)}</Text>
+            ) : null}
             <Pressable style={styles.detailCloseBtn} onPress={() => setDetailOpen(false)}>
               <Text style={styles.detailCloseBtnText}>Close</Text>
             </Pressable>
@@ -658,7 +706,7 @@ export function AdminOrdersScreen() {
             <View style={styles.reviewHeader}>
               <View>
                 <Text style={styles.detailLabel}>Change to "{prettyStatus(confirmAction)}"?</Text>
-                <Text style={styles.meta}>{getConfirmDescription(confirmAction)}</Text>
+                <Text style={styles.meta}>{getConfirmDescription(confirmAction, selectedOrder)}</Text>
               </View>
               <Pressable style={styles.detailCloseTopBtn} onPress={() => setConfirmOpen(false)} disabled={Boolean(submittingAction)}>
                 <Text style={styles.detailClose}>X</Text>
