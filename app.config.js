@@ -18,6 +18,7 @@ function loadDotEnv() {
     const eq = trimmed.indexOf("=");
     if (eq === -1) continue;
     const key = trimmed.slice(0, eq).trim();
+    if (key !== "EXPO_PUBLIC_API_BASE_URL") continue;
     let val = trimmed.slice(eq + 1).trim();
     if (
       (val.startsWith('"') && val.endsWith('"')) ||
@@ -36,7 +37,6 @@ loadDotEnv();
 const apiBaseUrl = String(process.env.EXPO_PUBLIC_API_BASE_URL || DEFAULT_API_BASE)
   .trim()
   .replace(/\/+$/, "");
-const adminSecret = String(process.env.EXPO_PUBLIC_ADMIN_SECRET || "").trim();
 
 module.exports = ({ config }) => ({
   ...config,
@@ -46,11 +46,12 @@ module.exports = ({ config }) => ({
   },
   plugins: [...(config.plugins || []), "@react-native-community/datetimepicker"],
   extra: {
-    ...(config.extra || {}),
+    ...Object.fromEntries(
+      Object.entries(config.extra || {}).filter(([key]) => !/^adminsecret$/i.test(key))
+    ),
     eas: {
       projectId: "b85e90e0-4895-42e8-8464-0d1126ad2ddd",
     },
     apiBaseUrl,
-    adminSecret,
   },
 });
