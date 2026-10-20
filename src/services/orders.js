@@ -2,7 +2,7 @@ import { pushNotification } from "./notifications";
 import { normalizeId, orderMatchesKey } from "../utils/id";
 import { API_BASE_URL, adminAuthHeaders } from "../config/apiEnv";
 
-const STATUS_FLOW = ["placed", "paid", "processing", "ready", "shipped", "completed", "cancelled", "refunded"];
+const STATUS_FLOW = ["placed", "pending_payment", "paid", "processing", "ready", "shipped", "completed", "cancelled", "refunded"];
 const TRACKING_STATUS_FLOW = [
   "order_placed",
   "preparing_to_ship",
