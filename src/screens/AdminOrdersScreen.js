@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Alert, Image, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, Image, Modal, Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
 import {
   addOrderTrackingEventAdmin,
@@ -255,7 +255,11 @@ export function AdminOrdersScreen() {
   }
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+    <ScrollView
+      style={styles.screen}
+      contentContainerStyle={styles.content}
+      refreshControl={<RefreshControl refreshing={loading} onRefresh={loadData} />}
+    >
       <View style={styles.headerRow}>
         <View>
           <Text style={styles.title}>Orders</Text>
@@ -355,46 +359,49 @@ export function AdminOrdersScreen() {
       ) : null}
 
       {filtered.map((o) => (
-        <Pressable
-          key={o.id}
-          style={styles.card}
-          onPress={() => {
-            setSelectedOrder(o);
-            setDetailOpen(true);
-          }}
-        >
+        <View key={o.id} style={styles.card}>
           <View style={styles.orderRowTop}>
-            <Text style={[styles.cardTitle, styles.colOrder]} numberOfLines={1}>{o.orderNumber || `JCE-${o.id}`}</Text>
-            <Text style={[styles.meta, styles.colCustomer]} numberOfLines={1}>
-              {o?.contact?.email || "-"}
-            </Text>
-            <View style={[styles.colStatus, styles.badgeWrap]}>
-              <Text style={[styles.badgeBase, styles[`badge${getBadgeTone(o.status)[0].toUpperCase()}${getBadgeTone(o.status).slice(1)}`]]}>
-                {prettyStatus(o.status)}
-              </Text>
-            </View>
-            <View style={[styles.colPayment, styles.badgeWrap]}>
-              <Text
-                style={[
-                  styles.badgeBase,
-                  styles[
-                    `badge${
-                      getBadgeTone(getPaymentStatus(o))[0].toUpperCase() +
-                      getBadgeTone(getPaymentStatus(o)).slice(1)
-                    }`
-                  ],
-                ]}
-              >
-                {prettyStatus(getPaymentStatus(o))}
-              </Text>
-            </View>
-            <Text style={[styles.total, styles.colTotal]} numberOfLines={1}>{money(o.total || o.subtotal)}</Text>
+            <Pressable
+              style={styles.orderDetailsPressable}
+              onPress={() => {
+                setSelectedOrder(o);
+                setDetailOpen(true);
+              }}
+            >
+              <View style={styles.orderMainRow}>
+                <Text style={[styles.cardTitle, styles.colOrder]} numberOfLines={1}>{o.orderNumber || `JCE-${o.id}`}</Text>
+                <Text style={[styles.meta, styles.colCustomer]} numberOfLines={1}>
+                  {o?.contact?.email || "-"}
+                </Text>
+                <View style={[styles.colStatus, styles.badgeWrap]}>
+                  <Text style={[styles.badgeBase, styles[`badge${getBadgeTone(o.status)[0].toUpperCase()}${getBadgeTone(o.status).slice(1)}`]]}>
+                    {prettyStatus(o.status)}
+                  </Text>
+                </View>
+                <View style={[styles.colPayment, styles.badgeWrap]}>
+                  <Text
+                    style={[
+                      styles.badgeBase,
+                      styles[
+                        `badge${
+                          getBadgeTone(getPaymentStatus(o))[0].toUpperCase() +
+                          getBadgeTone(getPaymentStatus(o)).slice(1)
+                        }`
+                      ],
+                    ]}
+                  >
+                    {prettyStatus(getPaymentStatus(o))}
+                  </Text>
+                </View>
+                <Text style={[styles.total, styles.colTotal]} numberOfLines={1}>{money(o.total || o.subtotal)}</Text>
+              </View>
+              <Text style={styles.meta}>{o?.contact?.firstName} {o?.contact?.lastName} • {formatDateTimePH(o.createdAt)}</Text>
+            </Pressable>
             <View style={styles.colAction}>
               {String(o?.paymentProofStatus || o?.proofStatus || "").toLowerCase() === "pending" ? (
                 <Pressable
                   style={styles.rowVerifyBtn}
-                  onPress={(event) => {
-                    event.stopPropagation();
+                  onPress={() => {
                     setReviewOrder(o);
                     setProofReferenceNo(String(o?.paymentProof?.referenceNumber || ""));
                     setProofRejectReason("");
@@ -407,13 +414,17 @@ export function AdminOrdersScreen() {
               ) : null}
             </View>
           </View>
-          <Text style={styles.meta}>{o?.contact?.firstName} {o?.contact?.lastName} • {formatDateTimePH(o.createdAt)}</Text>
-        </Pressable>
+        </View>
       ))}
 
       <Modal visible={reviewOpen} transparent animationType="fade" onRequestClose={() => setReviewOpen(false)}>
-        <Pressable style={styles.reviewBackdrop} onPress={() => setReviewOpen(false)}>
-          <Pressable style={styles.reviewModal} onPress={() => {}}>
+        <View style={styles.reviewBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setReviewOpen(false)} />
+          <ScrollView
+            style={styles.reviewModal}
+            contentContainerStyle={styles.reviewModalContent}
+            keyboardShouldPersistTaps="handled"
+          >
             <View style={styles.reviewHeader}>
               <View>
                 <Text style={styles.detailLabel}>PAYMENT PROOF</Text>
@@ -481,13 +492,18 @@ export function AdminOrdersScreen() {
                 <Text style={styles.dangerBtnText}>{submittingAction === "proof-reject" ? "Rejecting..." : "✗ Reject proof"}</Text>
               </Pressable>
             </View>
-          </Pressable>
-        </Pressable>
+          </ScrollView>
+        </View>
       </Modal>
 
       <Modal visible={detailOpen} transparent animationType="fade" onRequestClose={() => setDetailOpen(false)}>
-        <Pressable style={styles.detailBackdrop} onPress={() => setDetailOpen(false)}>
-          <Pressable style={styles.detailPanel} onPress={() => {}}>
+        <View style={styles.detailBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setDetailOpen(false)} />
+          <ScrollView
+            style={styles.detailPanel}
+            contentContainerStyle={styles.detailPanelContent}
+            keyboardShouldPersistTaps="handled"
+          >
             <View style={styles.detailHeader}>
               <View>
                 <Text style={styles.detailLabel}>ORDER</Text>
@@ -627,13 +643,18 @@ export function AdminOrdersScreen() {
             <Pressable style={styles.detailCloseBtn} onPress={() => setDetailOpen(false)}>
               <Text style={styles.detailCloseBtnText}>Close</Text>
             </Pressable>
-          </Pressable>
-        </Pressable>
+          </ScrollView>
+        </View>
       </Modal>
 
       <Modal visible={confirmOpen} transparent animationType="fade" onRequestClose={() => setConfirmOpen(false)}>
-        <Pressable style={styles.reviewBackdrop} onPress={() => setConfirmOpen(false)}>
-          <Pressable style={styles.reviewModal} onPress={() => {}}>
+        <View style={styles.reviewBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setConfirmOpen(false)} />
+          <ScrollView
+            style={styles.reviewModal}
+            contentContainerStyle={styles.reviewModalContent}
+            keyboardShouldPersistTaps="handled"
+          >
             <View style={styles.reviewHeader}>
               <View>
                 <Text style={styles.detailLabel}>Change to "{prettyStatus(confirmAction)}"?</Text>
@@ -675,8 +696,8 @@ export function AdminOrdersScreen() {
                 </Text>
               </Pressable>
             </View>
-          </Pressable>
-        </Pressable>
+          </ScrollView>
+        </View>
       </Modal>
     </ScrollView>
   );
@@ -745,6 +766,8 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   orderRowTop: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 },
+  orderDetailsPressable: { flex: 6.2 },
+  orderMainRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 },
   colOrder: { flex: 1.1 },
   colCustomer: { flex: 1.8 },
   colStatus: { flex: 1.1 },
@@ -795,6 +818,7 @@ const styles = StyleSheet.create({
   dangerBtnText: { color: brand.white, textAlign: "center", fontWeight: "800", fontSize: 11 },
   detailBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.22)", alignItems: "flex-end" },
   detailPanel: { width: "88%", maxWidth: 420, height: "100%", backgroundColor: "#f7f7f7", borderLeftWidth: 1, borderLeftColor: brand.border, padding: 14, paddingTop: 22 },
+  detailPanelContent: { flexGrow: 1, paddingBottom: 24 },
   detailHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   detailLabel: { color: brand.textLight, fontSize: 10, fontWeight: "800", letterSpacing: 1, marginBottom: 4 },
   detailTitle: { color: brand.dark, fontWeight: "900", fontSize: 16 },
@@ -829,6 +853,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#f8f8f8",
     padding: 12,
   },
+  reviewModalContent: { flexGrow: 1 },
   reviewHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 },
   reviewImage: { width: "100%", height: 260, borderRadius: 8, borderWidth: 1, borderColor: brand.border, backgroundColor: "#eee", marginBottom: 8 },
   reviewImageFallback: {
